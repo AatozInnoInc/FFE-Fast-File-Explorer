@@ -85,6 +85,8 @@ Folder navigation short-circuits on cache freshness: if a listing for the target
 
 `fx-core`'s `ListingCache` is that early exit for directory entries. A hit returns the stored listing and re-enumerates on the same volume's worker, replacing the stored entries only when the finished listing differs. A miss stores the listing when enumeration finishes. Eviction is `TODO — define`; the cache is unbounded in this slice. The ≤16 ms cache-hit figure is a UI paint target and is not measured in the crate.
 
+`list_shell` (`fx-core/src/bin/list_shell.rs`) is the first window. It shows one directory in a virtual `SysListView32` and calls `fx_core::shell` only. A cache hit sets the owner-data count and paints before the first `poll`. The control asks for a row's text when it paints that row. A timer drains `poll` without waiting, so a slow volume cannot stall the message loop. Closing the window cancels the live listing. There is no tree, address bar, icon, or context menu yet, and no C ABI.
+
 ## Non-goals (what we will NOT do)
 
 - HDD-optimized enumeration or seek-time workarounds — SSD-only is an explicit target.

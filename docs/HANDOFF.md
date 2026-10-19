@@ -1,6 +1,6 @@
 # Windows File Explorer — Coding Agent Handoff
 
-Status as of 2026-10-19. Owner: AatozInnoInc. Phase: `fx-core` enumerates directories, caches finished listings, and exposes the in-process `shell` module. Eviction is `TODO — define`. The Win32 UI is not started. SSD budgets are not measured. The UI/visual system exists as an HTML prototype. `theme-reference.html` is not in the repository.
+Status as of 2026-10-19. Owner: AatozInnoInc. Phase: `fx-core` enumerates directories, caches finished listings, and exposes the in-process `shell` module. `list_shell` shows one directory in a virtual `SysListView32`. Eviction is `TODO — define`. The tree, address bar, icons, and context menu are not started. SSD budgets are not measured. The UI/visual system exists as an HTML prototype. `theme-reference.html` is not in the repository.
 
 ---
 
@@ -73,7 +73,7 @@ Shared kernel: `FileEntry`, `Path`, `VolumeId`.
 The split memory budget is deliberate: idle must stay low so leaks are detectable; active use may be generous for aggressive caching. Primary hardware target: SSD systems.
 
 ### Navigation control flow
-Cache hit is an explicit early exit (paint from cache, revalidate in background). Cache miss goes to that volume's worker, streams first batch for first paint, then fills.
+Cache hit is an explicit early exit (paint from cache, revalidate in background). Cache miss goes to that volume's worker, streams first batch for first paint, then fills. `list_shell` is that path for one directory.
 
 ---
 
@@ -176,6 +176,7 @@ Implementation mapping: the HTML demo uses a `--sp` scale variable, Web Animatio
 
 - Design package is in this repository (`AatozInnoInc/FFE-Fast-File-Explorer`) as of 2026-10-19. It was drafted in Perplexity sessions on 2026-08-31 and 2026-09-22. Files: `README.md`, `CONTRIBUTING.md`, `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`, `docs/HANDOFF.md`, `docs/charts/context-map.md`, `docs/charts/navigation-flow.md`, `docs/theme-motion-spec.md`.
 - Enumeration crate: `fx-core/`. Windows directory reads use `FindFirstFileExW`. Portable tests use a scripted source. SSD budget numbers are not measured yet. Run `fx-core/examples/measure_listing.rs` on a Windows SSD when a real directory is available.
+- List window: `fx-core/src/bin/list_shell.rs`. One directory, virtual `SysListView32`, calls `fx_core::shell` only. Windows only.
 - Interactive HTML preview: Halo (8 palettes, Copper default), Lozenge, Deck, Strata, Vellum, with all 29 animations, a demo dock, reduced-motion toggle, and 0.25×–3× speed slider. `theme-reference.html` is still absent from the repository. The written spec is `docs/theme-motion-spec.md`.
 - Workflow templates: `AatozInnoInc/principal-engineer-skills/skills/autonomous-agentic-design-workflow/`.
 
@@ -222,12 +223,18 @@ Implementation mapping: the HTML demo uses a `--sp` scale variable, Web Animatio
 
 **Completed prompt.** Added `fx_core::shell`. `Shell::open` returns cached entries immediately when they exist, plus the live listing. `poll` is `try_recv` and does not block. `cancel` reaches that listing's token. The module does not expose `ScriptedSource`, the volume registry, or Windows handles. Enumeration and cache behavior are unchanged. Tests use the scripted source inside the crate. No IPC, no C ABI, and no UI. Questions 1–6 stay open. Eviction and the SSD budgets were not invented.
 
+### 2026-10-19T19:51:56Z — Win32 virtual list
+
+**Signed off by:** Grok 4.7, implementation pass.
+
+**Completed prompt.** Added `list_shell`, a Win32 window with one `SysListView32` in virtual/owner-data mode for one directory. It fills that list from `Shell::open` and `poll`. A cache hit sets the owner-data count and paints before the first `poll`. A miss appends batches. A revalidation replaces rows only when the finished listing differs; timeout, cancel, and failure keep the rows already shown. `LVN_GETDISPINFO` writes the name of the row the control asks for. The message loop is `GetMessageW`. `poll` runs from a timer and does not wait, so a slow volume does not stall the window. Closing the window cancels the live listing. The UI thread does not enumerate. No tree, address bar, icons, context menu, IPC, or C ABI. Questions 1–6 stay open. Eviction and the SSD budgets were not invented.
+
 ---
 
 ## 11. Prompt for Next Agent
 
-> The in-process door is `fx_core::shell`. Do not add IPC or a C ABI. Do not bypass `shell` with `ListingCache` or `enumerate`.
+> The list window is `fx-core`'s `list_shell` binary. It calls `fx_core::shell` in-process. Do not add IPC or a C ABI. Do not bypass `shell` with `ListingCache` or `enumerate`.
 >
-> Build the Win32 list shell: a `SysListView32` in virtual/owner-data mode that shows one directory. Fill it from `Shell::open` and `poll`. A cache hit paints from `cached` before `poll` finishes. Only visible rows ask the list for data. The UI thread never enumerates, and a slow volume does not stall this window.
+> Add a `SysTreeView32` beside that list. `SysTreeView32` has no owner-data style. Show the open directory as the root. Fill a node's children through `Shell::open` and `poll` only when that node expands, and insert only the children already returned. Do not insert grandchildren until those nodes expand. A cache hit paints those children before `poll` finishes. The UI thread never enumerates, and a slow volume does not stall the window. Do not enumerate a Network neighborhood; a network directory appears only when it is the directory the user opened.
 >
-> Do not build the tree, address bar, icons, or context menu in this slice. Do not decide questions 1–6. Do not invent an eviction size. SSD budgets are still unmeasured; do not invent those numbers. Reduced motion and the theme system are out of this slice.
+> Do not build the address bar, icons, or context menu. Do not decide questions 1–6. Do not invent an eviction size. SSD budgets are still unmeasured; do not invent those numbers. Reduced motion and the theme system are out of this slice.
