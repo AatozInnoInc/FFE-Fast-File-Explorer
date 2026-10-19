@@ -1,6 +1,6 @@
 # Windows File Explorer — Coding Agent Handoff
 
-Status as of 2026-10-19. Owner: AatozInnoInc. Phase: design package is in this repository; the core engine (`fx-core`) has not been started. The UI/visual system exists as an HTML prototype. `theme-reference.html` is not in the repository.
+Status as of 2026-10-19. Owner: AatozInnoInc. Phase: `fx-core` enumerates directories with one worker per volume. The listing cache, UI, and FFI are not started. SSD budgets are not measured. The UI/visual system exists as an HTML prototype. `theme-reference.html` is not in the repository.
 
 ---
 
@@ -174,6 +174,7 @@ Implementation mapping: the HTML demo uses a `--sp` scale variable, Web Animatio
 ## 9. Artifacts and where they are
 
 - Design package is in this repository (`AatozInnoInc/FFE-Fast-File-Explorer`) as of 2026-10-19. It was drafted in Perplexity sessions on 2026-08-31 and 2026-09-22. Files: `README.md`, `CONTRIBUTING.md`, `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`, `docs/HANDOFF.md`, `docs/charts/context-map.md`, `docs/charts/navigation-flow.md`, `docs/theme-motion-spec.md`.
+- Enumeration crate: `fx-core/`. Windows directory reads use `FindFirstFileExW`. Portable tests use a scripted source. SSD budget numbers are not measured yet. Run `fx-core/examples/measure_listing.rs` on a Windows SSD when a real directory is available.
 - Interactive HTML preview: Halo (8 palettes, Copper default), Lozenge, Deck, Strata, Vellum, with all 29 animations, a demo dock, reduced-motion toggle, and 0.25×–3× speed slider. `theme-reference.html` is still absent from the repository. The written spec is `docs/theme-motion-spec.md`.
 - Workflow templates: `AatozInnoInc/principal-engineer-skills/skills/autonomous-agentic-design-workflow/`.
 
@@ -196,27 +197,26 @@ Implementation mapping: the HTML demo uses a `--sp` scale variable, Web Animatio
 
 **This pass.** Recorded model roles under §4. Closed open question 8. Refreshed the repository status in this file. Wrote the `fx-core` implementation brief. Did not write the crate. Questions 1–7 remain open.
 
+### 2026-10-19T14:42:32Z — fx-core enumeration
+
+**Signed off by:** Grok 4.7, implementation pass.
+
+**Completed prompt.** Built `fx-core` with `FileEntry`, `Path`, and `VolumeId`. One detached worker and one cancellation token per volume. A second listing for a busy volume returns `VolumeBusy` and does not start another worker. Network volumes use a configurable timeout, default 2 seconds. Local volumes have no deadline. `Listing::try_recv` never blocks, including when a Windows call cannot be preempted. Production reads are `FindFirstFileExW` with `FindExInfoBasic` and `FIND_FIRST_EX_LARGE_FETCH` (`fx-core/src/windows.rs`). Tests use `ScriptedSource` and cover cancellation isolation, timeout isolation, local listings ignoring the network timeout, and a first batch before the source is exhausted. CI runs `rustfmt`, `clippy -D warnings`, and `cargo test` on Ubuntu, and clippy plus tests on Windows. No UI and no FFI. Questions 1–7 were not decided. The listing cache was not added. The ≤250 ms and ≤1 s SSD budgets were not measured; `cargo run --example measure_listing -- <directory>` prints them on Windows and does not assert them.
+
 ---
 
 ## 11. Prompt for Next Agent
 
-> This prompt is implementation work for the mid-level tier. The enumeration contract below is already reviewed. Do not redesign it, and do not create a new repository. The design package is already in this repo.
+> This prompt is implementation work for the mid-level tier. Do not redesign the enumeration contract. Do not build UI or FFI. Questions 1–7 in §8 stay open.
 >
-> Build a standalone Rust crate `fx-core` with no UI dependencies and no FFI. Open question 7 (the Rust/C++ boundary) stays open — do not design or build it.
+> Add an in-memory listing cache to `fx-core` for directory listings the enumerator already produced.
 >
-> Shared-kernel types: `FileEntry`, `Path`, and `VolumeId`.
->
-> Enumeration contract:
-> - One worker, one cancellation token, and one timeout budget per `VolumeId`. No two volumes share a worker or a blocking call.
-> - Network and non-local paths use a configurable timeout, default 2 seconds. Do not invent a local-SSD timeout, auto-retry behavior, or a search-ranking policy.
-> - Stream `FileEntry` batches over a channel.
-> - Production directory reads on Windows use `FindFirstFileExW` with `FindExInfoBasic` and `FIND_FIRST_EX_LARGE_FETCH`.
-> - A small enumerator seam is part of this design: production Windows code calls that API; tests use a scripted source that can delay, hang, and yield batches. The seam exists so isolation tests run on non-Windows CI. It is not a second enumeration design.
->
-> Tests must show that (a) cancelling or timing out one volume never delays another, and (b) the first batch arrives before enumeration completes.
->
-> The 100k SSD budgets (≤ 1 s full listing, ≤ 250 ms first batch) are measured only on Windows against a real directory. Report those numbers when they are measured. Do not publish pipeline-only or Linux timings as those budgets.
->
-> Set up CI with `rustfmt` (no custom `rustfmt.toml`), `clippy` with warnings denied, and the portable tests.
+> Control flow, already specified in `docs/charts/navigation-flow.md` and `docs/ARCHITECTURE.md`:
+> - Cache hit is an early exit: return the cached listing immediately, then re-enumerate on that volume's worker and replace the cached entries when the new listing differs.
+> - Cache miss: enumerate, stream batches, and store the listing when it finishes.
+> - Revalidation uses the same per-volume worker. A slow volume must not delay a cache hit on another volume.
+> - Do not invent an eviction size, a local-SSD timeout, auto-retry, or a search-ranking policy. Leave eviction as `TODO — define` and keep the cache unbounded for this slice.
+> - Tests, using the scripted source: a second request for the same directory returns the cached entries without waiting on a source that would delay; a background revalidation updates the cache when the new listing differs; a slow volume does not delay a cache hit on another volume.
+> - Do not claim the ≤16 ms cache-hit paint budget. That budget includes UI paint and is not measurable in this crate.
 >
 > Do not build any UI. Before deciding anything still open in §8 (questions 1–7), stop and ask the owner.
