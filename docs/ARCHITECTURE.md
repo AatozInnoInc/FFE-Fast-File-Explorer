@@ -30,7 +30,7 @@ Embed the context map here: `docs/charts/context-map.md`.
 
 - **Decision:** Rust for the enumeration/indexing/caching core, in a UI-free crate the Win32 shell calls in-process.
   - **Alternatives:** C++ core. A separate process with IPC between the shell and the core.
-  - **Why:** Memory safety for concurrent filesystem code, and a core that is independently unit-testable without any UI dependency. The owner chose in-process on 2026-10-19 so a cache hit does not pay a process hop before paint. Shell extensions and thumbnail generation stay in their own watchdog process; that isolation is for untrusted code, not for `fx-core`.
+  - **Why:** Memory safety for concurrent filesystem code, and a core that is independently unit-testable without any UI dependency. The owner chose in-process on 2026-10-19 so a cache hit does not pay a process hop before paint. The shell's only door is `fx_core::shell`: open, poll, and cancel. Shell extensions and thumbnail generation stay in their own watchdog process; that isolation is for untrusted code, not for `fx-core`.
 
 - **Decision:** `FindFirstFileEx` with `FIND_FIRST_EX_LARGE_FETCH` for standard folder browsing; direct NTFS MFT/USN Journal reads for whole-volume search and size calculations.
   - **Alternatives:** `IShellFolder`/COM enumeration (what Explorer uses today).

@@ -44,8 +44,24 @@ impl ListingCache {
         self.open_with(options, enumerate)
     }
 
+    #[cfg(test)]
+    pub(crate) fn open_scripted(
+        &self,
+        options: ListingOptions,
+        source: crate::source::ScriptedSource,
+    ) -> Result<CachedOpen, EnumError> {
+        self.open_with(options, |options| {
+            crate::enumerate::enumerate_scripted(options, source)
+        })
+    }
+
     /// Entries stored for this volume and directory, if a finished listing was cached.
-    pub fn cached_entries(&self, volume: &VolumeId, directory: &Path) -> Option<Vec<FileEntry>> {
+    #[cfg(test)]
+    pub(crate) fn cached_entries(
+        &self,
+        volume: &VolumeId,
+        directory: &Path,
+    ) -> Option<Vec<FileEntry>> {
         let key = cache_key(volume, directory);
         self.entries
             .lock()
@@ -143,7 +159,6 @@ fn cache_key(volume: &VolumeId, directory: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::enumerate::enumerate_scripted;
     use crate::kernel::VolumeKind;
     use crate::source::ScriptedSource;
     use std::thread;
@@ -230,16 +245,6 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| matches!(event, ListingEvent::Finished)));
-    }
-
-    impl ListingCache {
-        fn open_scripted(
-            &self,
-            options: ListingOptions,
-            source: ScriptedSource,
-        ) -> Result<CachedOpen, EnumError> {
-            self.open_with(options, |options| enumerate_scripted(options, source))
-        }
     }
 
     #[test]
