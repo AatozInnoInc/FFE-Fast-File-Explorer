@@ -83,6 +83,8 @@ These are proposed v1 targets, not yet measured. They must be validated against 
 
 Folder navigation short-circuits on cache freshness: if a listing for the target folder is already cached, the UI renders immediately from cache and only then kicks off an async background re-enumeration to reconcile any changes, patching visible rows in place if anything differs. Only on a cache miss does the flow dispatch a fresh async enumeration and populate the virtual list as batches arrive. In both paths, the UI list only ever requests data for the currently visible row range — off-screen rows never trigger enumeration, painting, or thumbnail work. Every volume's enumeration runs on its own isolated worker; a timeout or hang on one volume changes only that volume's own status, and is never visible as a delay anywhere else in the UI. See `docs/charts/navigation-flow.md` for the full branching diagram, including both exits.
 
+`fx-core`'s `ListingCache` is that early exit for directory entries. A hit returns the stored listing and re-enumerates on the same volume's worker, replacing the stored entries only when the finished listing differs. A miss stores the listing when enumeration finishes. Eviction is `TODO — define`; the cache is unbounded in this slice. The ≤16 ms cache-hit figure is a UI paint target and is not measured in the crate.
+
 ## Non-goals (what we will NOT do)
 
 - HDD-optimized enumeration or seek-time workarounds — SSD-only is an explicit target.

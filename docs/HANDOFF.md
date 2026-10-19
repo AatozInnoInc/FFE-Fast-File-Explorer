@@ -1,6 +1,6 @@
 # Windows File Explorer — Coding Agent Handoff
 
-Status as of 2026-10-19. Owner: AatozInnoInc. Phase: `fx-core` enumerates directories with one worker per volume. The listing cache, UI, and FFI are not started. SSD budgets are not measured. The UI/visual system exists as an HTML prototype. `theme-reference.html` is not in the repository.
+Status as of 2026-10-19. Owner: AatozInnoInc. Phase: `fx-core` enumerates directories and caches finished listings. Eviction is `TODO — define`. The UI and FFI are not started. SSD budgets are not measured. The UI/visual system exists as an HTML prototype. `theme-reference.html` is not in the repository.
 
 ---
 
@@ -203,20 +203,18 @@ Implementation mapping: the HTML demo uses a `--sp` scale variable, Web Animatio
 
 **Completed prompt.** Built `fx-core` with `FileEntry`, `Path`, and `VolumeId`. One detached worker and one cancellation token per volume. A second listing for a busy volume returns `VolumeBusy` and does not start another worker. Network volumes use a configurable timeout, default 2 seconds. Local volumes have no deadline. `Listing::try_recv` never blocks, including when a Windows call cannot be preempted. Production reads are `FindFirstFileExW` with `FindExInfoBasic` and `FIND_FIRST_EX_LARGE_FETCH` (`fx-core/src/windows.rs`). Tests use `ScriptedSource` and cover cancellation isolation, timeout isolation, local listings ignoring the network timeout, and a first batch before the source is exhausted. CI runs `rustfmt`, `clippy -D warnings`, and `cargo test` on Ubuntu, and clippy plus tests on Windows. No UI and no FFI. Questions 1–7 were not decided. The listing cache was not added. The ≤250 ms and ≤1 s SSD budgets were not measured; `cargo run --example measure_listing -- <directory>` prints them on Windows and does not assert them.
 
+### 2026-10-19T15:24:03Z — Listing cache
+
+**Signed off by:** Grok 4.7, implementation pass.
+
+**Completed prompt.** Added `ListingCache` in `fx-core`. A hit returns the stored entries without waiting, then re-enumerates on that volume's existing worker and replaces the stored entries only when the finished listing differs. A miss streams batches and stores the listing when it finishes. A timed-out or cancelled revalidation leaves the previous entries in place. A slow volume does not delay a cache hit on another volume. Eviction is `TODO — define`; the cache is unbounded. Tests use `ScriptedSource`. The ≤16 ms cache-hit paint budget was not claimed. No UI and no FFI. Questions 1–7 were not decided.
+
 ---
 
 ## 11. Prompt for Next Agent
 
-> This prompt is implementation work for the mid-level tier. Do not redesign the enumeration contract. Do not build UI or FFI. Questions 1–7 in §8 stay open.
+> Enumeration and the listing cache are in `fx-core`. Do not build UI or FFI.
 >
-> Add an in-memory listing cache to `fx-core` for directory listings the enumerator already produced.
+> Question 7, the Rust/C++ boundary, is still open. The remaining v1 roadmap items (virtualized Win32 list and tree, address bar, icon cache) need that boundary before implementation. Stop and ask the owner whether the shell calls `fx-core` in-process or across a boundary. Do not choose.
 >
-> Control flow, already specified in `docs/charts/navigation-flow.md` and `docs/ARCHITECTURE.md`:
-> - Cache hit is an early exit: return the cached listing immediately, then re-enumerate on that volume's worker and replace the cached entries when the new listing differs.
-> - Cache miss: enumerate, stream batches, and store the listing when it finishes.
-> - Revalidation uses the same per-volume worker. A slow volume must not delay a cache hit on another volume.
-> - Do not invent an eviction size, a local-SSD timeout, auto-retry, or a search-ranking policy. Leave eviction as `TODO — define` and keep the cache unbounded for this slice.
-> - Tests, using the scripted source: a second request for the same directory returns the cached entries without waiting on a source that would delay; a background revalidation updates the cache when the new listing differs; a slow volume does not delay a cache hit on another volume.
-> - Do not claim the ≤16 ms cache-hit paint budget. That budget includes UI paint and is not measurable in this crate.
->
-> Do not build any UI. Before deciding anything still open in §8 (questions 1–7), stop and ask the owner.
+> Do not decide questions 1–6. Do not invent an eviction size. SSD budgets are still unmeasured; do not invent those numbers either.
