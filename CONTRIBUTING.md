@@ -16,7 +16,7 @@ Every contributor — human or agent — follows the same cycle:
 
 ## Design changes
 
-Design changes require sign-off from the top-reasoning model tier (see the model-roles table in `HANDOFF.md`). Do not quietly change architecture inside an implementation task — raise it, get sign-off, then record it in `ARCHITECTURE.md`. In particular: the decision to use native Win32 controls plus targeted Direct2D owner-draw (instead of a fully custom renderer) is a load-bearing architectural choice made for stability reasons — do not revert to a custom-render approach without an explicit design review.
+Design changes require sign-off from the frontier tier (see **Model selection** in `docs/HANDOFF.md`). Do not quietly change architecture inside an implementation task — raise it, get sign-off, then record it in `ARCHITECTURE.md`. In particular: the decision to use native Win32 controls plus targeted Direct2D owner-draw (instead of a fully custom renderer) is a load-bearing architectural choice made for stability reasons — do not revert to a custom-render approach without an explicit design review.
 
 ## Documentation discipline
 

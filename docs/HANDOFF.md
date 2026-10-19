@@ -1,6 +1,6 @@
 # Windows File Explorer — Coding Agent Handoff
 
-Status as of 2026-10-15. Owner: AatozInnoInc. Phase: design complete enough to start the core engine; UI/visual system in prototype (HTML) form; no implementation code and no project repository exist yet.
+Status as of 2026-10-19. Owner: AatozInnoInc. Phase: design package is in this repository; the core engine (`fx-core`) has not been started. The UI/visual system exists as an HTML prototype. `theme-reference.html` is not in the repository.
 
 ---
 
@@ -86,6 +86,25 @@ Cache hit is an explicit early exit (paint from cache, revalidate in background)
 - Design package follows `AatozInnoInc/principal-engineer-skills` → `skills/autonomous-agentic-design-workflow/` templates: README, ARCHITECTURE, `docs/charts/` (context-map, navigation-flow), ROADMAP, CONTRIBUTING, HANDOFF. Use those templates exactly.
 - License: undecided.
 
+### Model selection
+
+Different tasks call for different reasoning effort. Maximum reasoning on mechanical work wastes budget and time. Low reasoning on architecture decisions produces poor results. Select by role and effort. Do not lock this workflow to one vendor.
+
+Claude names in the original guide are effort-class examples only: frontier like `claude-opus` at maximum, mid-level like `claude-sonnet` at high, flash like `claude-haiku` at low. This workflow uses Grok.
+
+| Role | Effort | Current selection | Typical tasks |
+|---|---|---|---|
+| Frontier — design and review | Maximum reasoning | `grok-4.7-xhigh` | Architecture decisions, DDD modeling, domain-layer design, and review of any proposal that touches bounded contexts or the enumeration contract before work continues |
+| Mid-level — implementation | High reasoning | `grok-4.7-high` | Feature coding and tests that follow an already reviewed design. Step up to maximum reasoning only when the coding is hard and the design is unchanged |
+| Flash — mechanical | Low reasoning | `grok-4.7-low` | Refactoring, renaming, documentation edits, boilerplate scaffolding |
+
+Rules:
+
+1. Read `docs/HANDOFF.md` and `docs/ARCHITECTURE.md` fully before writing any code.
+2. Every handoff updates this file, moves the finished prompt into the Handoff Log with an ISO 8601 sign-off timestamp and the model that did the work, and leaves exactly one **Prompt for Next Agent**.
+3. Any change to the domain model, bounded contexts, or the enumeration contract requires frontier review before proceeding. That contract is the shared kernel (`FileEntry`, `Path`, `VolumeId`) plus per-volume workers, cancellation, and the network timeout.
+4. Do not lock the workflow to one vendor. The role and the reasoning effort are what matter.
+
 ---
 
 ## 5. Smart search design (v2)
@@ -148,18 +167,56 @@ Implementation mapping: the HTML demo uses a `--sp` scale variable, Web Animatio
 5. C++ `clang-format` base style; license.
 6. Final decision on Lozenge / Deck / Strata / Vellum: separate themes vs. borrowed interactions (e.g., Strata Z-lift, Halo selection inside Lozenge).
 7. FFI boundary between Rust core and C++ shell (shape not yet designed).
-8. Model-roles table in HANDOFF (owner accepted the earlier proposal as fine).
+8. **Resolved 2026-10-19.** Model roles are recorded under **Model selection** in §4. Select by role and reasoning effort. This workflow uses Grok.
 
 ---
 
 ## 9. Artifacts and where they are
 
-- Design package (README, ARCHITECTURE, charts, ROADMAP, CONTRIBUTING, HANDOFF) and the Modern-theme research report were generated in Perplexity sessions on 2026-08-31 and 2026-09-22. **They have not been pushed to any repository.** No `windows-file-explorer` repo exists under AatozInnoInc as of 2026-10-15.
-- Interactive HTML preview: Halo (8 palettes, Copper default), Lozenge, Deck, Strata, Vellum, with all 29 animations, a demo dock, reduced-motion toggle, and 0.25×–3× speed slider. Exists as a session attachment only.
+- Design package is in this repository (`AatozInnoInc/FFE-Fast-File-Explorer`) as of 2026-10-19. It was drafted in Perplexity sessions on 2026-08-31 and 2026-09-22. Files: `README.md`, `CONTRIBUTING.md`, `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`, `docs/HANDOFF.md`, `docs/charts/context-map.md`, `docs/charts/navigation-flow.md`, `docs/theme-motion-spec.md`.
+- Interactive HTML preview: Halo (8 palettes, Copper default), Lozenge, Deck, Strata, Vellum, with all 29 animations, a demo dock, reduced-motion toggle, and 0.25×–3× speed slider. `theme-reference.html` is still absent from the repository. The written spec is `docs/theme-motion-spec.md`.
 - Workflow templates: `AatozInnoInc/principal-engineer-skills/skills/autonomous-agentic-design-workflow/`.
 
 ---
 
-## 10. Prompt for Next Agent
+## 10. Handoff Log
 
-> Create a private repository `AatozInnoInc/windows-file-explorer` and lay out the design package in `docs/` using the `autonomous-agentic-design-workflow` templates, populated from this handoff (leave open questions as `TODO — define`). Then implement the first slice: a standalone Rust crate `fx-core` with no UI dependencies that enumerates a directory via `FindFirstFileExW` (`FindExInfoBasic`, `FIND_FIRST_EX_LARGE_FETCH`), streams `FileEntry` batches over a channel, and runs each `VolumeId` on its own worker with its own cancellation token and configurable timeout (default 2 s for network paths). Prove with tests that (a) cancelling or timing out one volume never delays another, (b) the first batch arrives before enumeration completes, and (c) a 100k-entry fixture directory is benchmarked against the ≤1 s full-listing and ≤250 ms first-batch targets on SSD — report measured numbers, do not claim them. Set up CI with `rustfmt`, `clippy`, and tests. Do not build any UI or FFI yet. Before deciding anything listed in §8, stop and ask the owner.
+### 2026-10-19T14:20:27Z — Design package in repository; model roles recorded
+
+**Signed off by:** Grok 4.7, design/review pass.
+
+**Completed prompt (partial).** The previous prompt asked to create a repository, lay out the design package, and then implement `fx-core`. The repository and design package are done. `fx-core` was not started. The reviewed brief for it is the current **Prompt for Next Agent**. Roadmap items for the crate stay `planned`.
+
+**What landed:**
+
+- `README.md`, `CONTRIBUTING.md`
+- `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`, `docs/HANDOFF.md`
+- `docs/charts/context-map.md`, `docs/charts/navigation-flow.md`
+- `docs/theme-motion-spec.md` (`theme-reference.html` is still absent)
+
+**This pass.** Recorded model roles under §4. Closed open question 8. Refreshed the repository status in this file. Wrote the `fx-core` implementation brief. Did not write the crate. Questions 1–7 remain open.
+
+---
+
+## 11. Prompt for Next Agent
+
+> This prompt is implementation work for the mid-level tier. The enumeration contract below is already reviewed. Do not redesign it, and do not create a new repository. The design package is already in this repo.
+>
+> Build a standalone Rust crate `fx-core` with no UI dependencies and no FFI. Open question 7 (the Rust/C++ boundary) stays open — do not design or build it.
+>
+> Shared-kernel types: `FileEntry`, `Path`, and `VolumeId`.
+>
+> Enumeration contract:
+> - One worker, one cancellation token, and one timeout budget per `VolumeId`. No two volumes share a worker or a blocking call.
+> - Network and non-local paths use a configurable timeout, default 2 seconds. Do not invent a local-SSD timeout, auto-retry behavior, or a search-ranking policy.
+> - Stream `FileEntry` batches over a channel.
+> - Production directory reads on Windows use `FindFirstFileExW` with `FindExInfoBasic` and `FIND_FIRST_EX_LARGE_FETCH`.
+> - A small enumerator seam is part of this design: production Windows code calls that API; tests use a scripted source that can delay, hang, and yield batches. The seam exists so isolation tests run on non-Windows CI. It is not a second enumeration design.
+>
+> Tests must show that (a) cancelling or timing out one volume never delays another, and (b) the first batch arrives before enumeration completes.
+>
+> The 100k SSD budgets (≤ 1 s full listing, ≤ 250 ms first batch) are measured only on Windows against a real directory. Report those numbers when they are measured. Do not publish pipeline-only or Linux timings as those budgets.
+>
+> Set up CI with `rustfmt` (no custom `rustfmt.toml`), `clippy` with warnings denied, and the portable tests.
+>
+> Do not build any UI. Before deciding anything still open in §8 (questions 1–7), stop and ask the owner.
