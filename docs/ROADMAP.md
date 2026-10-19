@@ -8,16 +8,17 @@ Status legend: `planned` · `in progress` · `done` · `deferred`
 
 The smallest slice that delivers real value: open, navigate, and scroll local folders — including very large ones — faster than Windows 11 Explorer, with per-volume isolation guaranteed from day one so no drive or network location can ever block the UI. "Done" means a folder of 100k+ files opens and scrolls without perceptible stutter, verified against the performance budgets in `docs/ARCHITECTURE.md`.
 
-- [ ] Rust core engine crate: async `FindFirstFileEx` enumeration + in-memory listing cache — `planned`
-- [ ] Per-volume isolated async workers with cancellation tokens — no shared threads/blocking calls across volumes — `planned`
-- [ ] Network/non-local enumeration timeout (default 2 s, user-configurable), enforced without ever blocking the UI thread during the wait — `planned`
+- [x] Rust core engine crate: `FindFirstFileEx` enumeration streaming `FileEntry` batches (`fx-core`) — `done`
+- [ ] In-memory listing cache (cache-hit short-circuit) — `planned`
+- [x] Per-volume isolated workers with cancellation tokens — no shared threads or blocking calls across volumes — `done`
+- [x] Network/non-local enumeration timeout in the core (default 2 s, configurable). The caller polls `Listing::try_recv` and is not blocked during the wait — `done`
 - [ ] "Network" tree node: lazy, collapsed by default, never eagerly enumerated — `planned`
 - [ ] FFI/IPC boundary between Rust core and native Win32 shell — `planned`
 - [ ] Win32 shell: `SysListView32` in virtual/owner-data mode wired to the core — `planned`
 - [ ] `SysTreeView32` folder tree, same virtualized data pattern — `planned`
 - [ ] Basic navigation: address bar, back/forward, keyboard nav — `planned`
 - [ ] Icon caching by file extension (avoid per-file `SHGetFileInfo` calls) — `planned`
-- [ ] CI: unit tests for the core engine, static analysis gate on merge — `planned`
+- [x] CI: unit tests for the core engine, `rustfmt`, and `clippy` gate on merge — `done`
 
 ## v1.5 — Visual polish and safety nets
 
@@ -50,4 +51,4 @@ Ideas worth keeping but not yet scheduled. No commitment implied.
 
 ## Notes
 
-Project is in the design phase as of 2026-09-22; no code has been written yet. Confirmed during design discussion: SSD-only target (HDD support explicitly out of scope), active-use memory ceiling raised from an initial 50 MB draft to 512 MB (idle stays at 80 MB as the meaningful tripwire), cold-enumeration budget tightened from 2 s to 1 s given the SSD-only scope, and a hard requirement that no volume — network or otherwise — may ever block the UI, enforced via per-volume worker isolation plus a 2 s configurable timeout. Three items remain open (auto-retry behavior on timeout, whether full-text search is in scope, and whether frecency ranking is the default) — see `docs/ARCHITECTURE.md` Open design questions.
+`fx-core` enumerates directories as of 2026-10-19. The listing cache, UI, and FFI are not started. SSD budget numbers are not measured. Confirmed during design discussion: SSD-only target (HDD support explicitly out of scope), active-use memory ceiling raised from an initial 50 MB draft to 512 MB (idle stays at 80 MB as the meaningful tripwire), cold-enumeration budget tightened from 2 s to 1 s given the SSD-only scope, and a hard requirement that no volume — network or otherwise — may ever block the UI, enforced via per-volume worker isolation plus a 2 s configurable timeout. Three items remain open (auto-retry behavior on timeout, whether full-text search is in scope, and whether frecency ranking is the default) — see `docs/ARCHITECTURE.md` Open design questions.

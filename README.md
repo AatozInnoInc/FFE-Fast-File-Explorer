@@ -8,11 +8,23 @@ Windows 11 File Explorer is slow to render even on a fresh install because of la
 
 ## Status
 
-Design phase — no code written yet. See `docs/ROADMAP.md` for the v1 slice definition and current progress.
+`fx-core` enumerates directories with one worker per volume. The listing cache and UI are not started. See `docs/ROADMAP.md`.
 
 ## Getting started
 
-Setup instructions will land with v1.
+The enumeration core is the `fx-core` crate. From that directory:
+
+```
+cargo test
+```
+
+On Windows, measure a real directory with:
+
+```
+cargo run --example measure_listing -- C:\some\directory
+```
+
+The example prints first-batch and full-listing times next to the ≤250 ms and ≤1 s targets. It does not pass or fail those targets. No SSD measurement is recorded in the repo yet.
 
 ## Documentation
 
