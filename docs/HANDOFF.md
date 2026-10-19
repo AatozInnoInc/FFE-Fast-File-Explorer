@@ -1,6 +1,6 @@
 # Windows File Explorer — Coding Agent Handoff
 
-Status as of 2026-10-19. Owner: AatozInnoInc. Phase: `fx-core` enumerates directories and caches finished listings. Eviction is `TODO — define`. The UI and FFI are not started. SSD budgets are not measured. The UI/visual system exists as an HTML prototype. `theme-reference.html` is not in the repository.
+Status as of 2026-10-19. Owner: AatozInnoInc. Phase: `fx-core` enumerates directories and caches finished listings. The Win32 shell will call it in-process. Eviction is `TODO — define`. The UI is not started. SSD budgets are not measured. The UI/visual system exists as an HTML prototype. `theme-reference.html` is not in the repository.
 
 ---
 
@@ -52,6 +52,7 @@ Shared kernel: `FileEntry`, `Path`, `VolumeId`.
 
 ### Key decisions (with rationale)
 - **Rust core engine, no UI dependencies.** Enumeration, caching, indexing live in a standalone, unit-tested Rust library for memory safety under concurrency. Fuzz anything that parses untrusted input (shortcuts, metadata, archive headers).
+- **In-process shell call.** The Win32 shell calls `fx-core` in the same process. There is no IPC hop on the listing path. Owner decision 2026-10-19, for the cache-hit paint budget. Shell extensions and thumbnail providers stay out of process.
 - **Native Win32 shell with Direct2D/DirectWrite.** Original decision: `SysListView32` (owner-data/virtual mode) and `SysTreeView32` for inherited accessibility/DPI/keyboard behavior, with Direct2D owner-draw via `NM_CUSTOMDRAW` only where it earns its keep. Later visual work (§6) established that custom-drawn chrome and GPU-friendly effects are acceptable where they serve the product — **but the testable core/UI boundary must remain.** See open question Q1 on how far custom drawing goes.
 - **Enumeration:** `FindFirstFileEx` with `FIND_FIRST_EX_LARGE_FETCH` for directory listing (not `IShellFolder`/COM). MFT reads + USN Change Journal for whole-volume indexing.
 - **Virtualization:** only viewport rows are materialized; data fetched in batches ("chunky, not chatty"); results stream asynchronously.
@@ -166,7 +167,7 @@ Implementation mapping: the HTML demo uses a `--sp` scale variable, Web Animatio
 4. Frecency as default ranking vs. pure match quality with recency as a sort option?
 5. C++ `clang-format` base style; license.
 6. Final decision on Lozenge / Deck / Strata / Vellum: separate themes vs. borrowed interactions (e.g., Strata Z-lift, Halo selection inside Lozenge).
-7. FFI boundary between Rust core and C++ shell (shape not yet designed).
+7. **Resolved 2026-10-19.** The shell calls `fx-core` in-process. Enumeration and the listing cache do not cross a process boundary. A C ABI is not designed.
 8. **Resolved 2026-10-19.** Model roles are recorded under **Model selection** in §4. Select by role and reasoning effort. This workflow uses Grok.
 
 ---
@@ -209,12 +210,20 @@ Implementation mapping: the HTML demo uses a `--sp` scale variable, Web Animatio
 
 **Completed prompt.** Added `ListingCache` in `fx-core`. A hit returns the stored entries without waiting, then re-enumerates on that volume's existing worker and replaces the stored entries only when the finished listing differs. A miss streams batches and stores the listing when it finishes. A timed-out or cancelled revalidation leaves the previous entries in place. A slow volume does not delay a cache hit on another volume. Eviction is `TODO — define`; the cache is unbounded. Tests use `ScriptedSource`. The ≤16 ms cache-hit paint budget was not claimed. No UI and no FFI. Questions 1–7 were not decided.
 
+### 2026-10-19T18:31:28Z — Shell calls fx-core in-process
+
+**Signed off by:** Grok 4.7, design/review pass. **Owner decision.**
+
+**Completed prompt.** Asked whether the shell calls `fx-core` in-process or across a process boundary. The owner chose in-process. Recorded in §3, §8 question 7, `docs/ARCHITECTURE.md`, and `docs/ROADMAP.md`. No IPC hop on the listing path. Shell extensions and thumbnail providers stay out of process. No UI was built. No C ABI was designed. Questions 1–6 stay open. Eviction and the SSD budgets were not invented.
+
 ---
 
 ## 11. Prompt for Next Agent
 
-> Enumeration and the listing cache are in `fx-core`. Do not build UI or FFI.
+> The owner decided that the Win32 shell calls `fx-core` in-process. Do not add IPC. Do not add a C ABI. Do not build UI.
 >
-> Question 7, the Rust/C++ boundary, is still open. The remaining v1 roadmap items (virtualized Win32 list and tree, address bar, icon cache) need that boundary before implementation. Stop and ask the owner whether the shell calls `fx-core` in-process or across a boundary. Do not choose.
+> Add one Rust module, `shell`, that is the only API the future shell may call. It wraps `ListingCache` and exposes open, poll, and cancel. Open returns cached entries immediately when they exist, plus the live listing. Poll is `try_recv` and never blocks. Cancel reaches that listing's token.
 >
-> Do not decide questions 1–6. Do not invent an eviction size. SSD budgets are still unmeasured; do not invent those numbers either.
+> The module must not expose `ScriptedSource`, the volume registry, or Windows handles. Do not change enumeration or cache behavior. Tests for the module use the scripted source from inside the crate.
+>
+> Do not decide questions 1–6. Do not invent an eviction size. SSD budgets are still unmeasured; do not invent those numbers.
