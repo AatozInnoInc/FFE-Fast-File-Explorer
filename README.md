@@ -8,7 +8,7 @@ Windows 11 File Explorer is slow to render even on a fresh install because of la
 
 ## Status
 
-`fx-core` enumerates directories with one worker per volume and caches a finished listing for the next open. The UI is not started. See `docs/ROADMAP.md`.
+`fx-core` enumerates directories with one worker per volume, caches a finished listing, and exposes `shell` (open, poll, cancel) for the in-process Win32 shell. The UI is not started. See `docs/ROADMAP.md`.
 
 ## Getting started
 

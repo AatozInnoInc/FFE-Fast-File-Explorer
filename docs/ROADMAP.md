@@ -13,7 +13,7 @@ The smallest slice that delivers real value: open, navigate, and scroll local fo
 - [x] Per-volume isolated workers with cancellation tokens — no shared threads or blocking calls across volumes — `done`
 - [x] Network/non-local enumeration timeout in the core (default 2 s, configurable). The caller polls `Listing::try_recv` and is not blocked during the wait — `done`
 - [ ] "Network" tree node: lazy, collapsed by default, never eagerly enumerated — `planned`
-- [ ] In-process call surface the Win32 shell uses to reach `fx-core` (no IPC on the listing path) — `planned`
+- [x] In-process call surface the Win32 shell uses to reach `fx-core` (`shell`: open, poll, cancel; no IPC) — `done`
 - [ ] Win32 shell: `SysListView32` in virtual/owner-data mode wired to the core — `planned`
 - [ ] `SysTreeView32` folder tree, same virtualized data pattern — `planned`
 - [ ] Basic navigation: address bar, back/forward, keyboard nav — `planned`
@@ -51,4 +51,4 @@ Ideas worth keeping but not yet scheduled. No commitment implied.
 
 ## Notes
 
-`fx-core` enumerates directories and caches finished listings as of 2026-10-19. The shell will call it in-process; that call surface is not written yet. Cache eviction is `TODO — define`. SSD budget numbers are not measured. Confirmed during design discussion: SSD-only target (HDD support explicitly out of scope), active-use memory ceiling raised from an initial 50 MB draft to 512 MB (idle stays at 80 MB as the meaningful tripwire), cold-enumeration budget tightened from 2 s to 1 s given the SSD-only scope, and a hard requirement that no volume — network or otherwise — may ever block the UI, enforced via per-volume worker isolation plus a 2 s configurable timeout. Three items remain open (auto-retry behavior on timeout, whether full-text search is in scope, and whether frecency ranking is the default) — see `docs/ARCHITECTURE.md` Open design questions.
+`fx-core` enumerates directories, caches finished listings, and exposes an in-process `shell` module (open, poll, cancel) as of 2026-10-19. The Win32 UI is not started. Cache eviction is `TODO — define`. SSD budget numbers are not measured. Confirmed during design discussion: SSD-only target (HDD support explicitly out of scope), active-use memory ceiling raised from an initial 50 MB draft to 512 MB (idle stays at 80 MB as the meaningful tripwire), cold-enumeration budget tightened from 2 s to 1 s given the SSD-only scope, and a hard requirement that no volume — network or otherwise — may ever block the UI, enforced via per-volume worker isolation plus a 2 s configurable timeout. Three items remain open (auto-retry behavior on timeout, whether full-text search is in scope, and whether frecency ranking is the default) — see `docs/ARCHITECTURE.md` Open design questions.

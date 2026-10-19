@@ -31,6 +31,7 @@ pub const DEFAULT_BATCH_SIZE: usize = 256;
 pub const DEFAULT_NETWORK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// What to list, and which volume owns the worker.
+#[cfg_attr(not(any(test, windows)), allow(dead_code))]
 pub struct ListingOptions {
     pub volume: VolumeId,
     pub directory: Path,

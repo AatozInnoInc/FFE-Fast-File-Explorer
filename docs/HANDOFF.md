@@ -1,6 +1,6 @@
 # Windows File Explorer — Coding Agent Handoff
 
-Status as of 2026-10-19. Owner: AatozInnoInc. Phase: `fx-core` enumerates directories and caches finished listings. The Win32 shell will call it in-process. Eviction is `TODO — define`. The UI is not started. SSD budgets are not measured. The UI/visual system exists as an HTML prototype. `theme-reference.html` is not in the repository.
+Status as of 2026-10-19. Owner: AatozInnoInc. Phase: `fx-core` enumerates directories, caches finished listings, and exposes the in-process `shell` module. Eviction is `TODO — define`. The Win32 UI is not started. SSD budgets are not measured. The UI/visual system exists as an HTML prototype. `theme-reference.html` is not in the repository.
 
 ---
 
@@ -216,14 +216,18 @@ Implementation mapping: the HTML demo uses a `--sp` scale variable, Web Animatio
 
 **Completed prompt.** Asked whether the shell calls `fx-core` in-process or across a process boundary. The owner chose in-process. Recorded in §3, §8 question 7, `docs/ARCHITECTURE.md`, and `docs/ROADMAP.md`. No IPC hop on the listing path. Shell extensions and thumbnail providers stay out of process. No UI was built. No C ABI was designed. Questions 1–6 stay open. Eviction and the SSD budgets were not invented.
 
+### 2026-10-19T18:46:22Z — In-process shell module
+
+**Signed off by:** Grok 4.7, implementation pass.
+
+**Completed prompt.** Added `fx_core::shell`. `Shell::open` returns cached entries immediately when they exist, plus the live listing. `poll` is `try_recv` and does not block. `cancel` reaches that listing's token. The module does not expose `ScriptedSource`, the volume registry, or Windows handles. Enumeration and cache behavior are unchanged. Tests use the scripted source inside the crate. No IPC, no C ABI, and no UI. Questions 1–6 stay open. Eviction and the SSD budgets were not invented.
+
 ---
 
 ## 11. Prompt for Next Agent
 
-> The owner decided that the Win32 shell calls `fx-core` in-process. Do not add IPC. Do not add a C ABI. Do not build UI.
+> The in-process door is `fx_core::shell`. Do not add IPC or a C ABI. Do not bypass `shell` with `ListingCache` or `enumerate`.
 >
-> Add one Rust module, `shell`, that is the only API the future shell may call. It wraps `ListingCache` and exposes open, poll, and cancel. Open returns cached entries immediately when they exist, plus the live listing. Poll is `try_recv` and never blocks. Cancel reaches that listing's token.
+> Build the Win32 list shell: a `SysListView32` in virtual/owner-data mode that shows one directory. Fill it from `Shell::open` and `poll`. A cache hit paints from `cached` before `poll` finishes. Only visible rows ask the list for data. The UI thread never enumerates, and a slow volume does not stall this window.
 >
-> The module must not expose `ScriptedSource`, the volume registry, or Windows handles. Do not change enumeration or cache behavior. Tests for the module use the scripted source from inside the crate.
->
-> Do not decide questions 1–6. Do not invent an eviction size. SSD budgets are still unmeasured; do not invent those numbers.
+> Do not build the tree, address bar, icons, or context menu in this slice. Do not decide questions 1–6. Do not invent an eviction size. SSD budgets are still unmeasured; do not invent those numbers. Reduced motion and the theme system are out of this slice.

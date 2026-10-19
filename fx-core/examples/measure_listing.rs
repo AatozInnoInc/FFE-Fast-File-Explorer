@@ -21,7 +21,7 @@ fn run() -> ExitCode {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use fx_core::{enumerate, ListingEvent, ListingOptions, Path, TryEvent, VolumeId};
+    use fx_core::{ListingEvent, Path, Shell, TryEvent, VolumeId};
 
     let Some(directory) = env::args().nth(1) else {
         eprintln!("usage: measure_listing <directory>");
@@ -29,13 +29,8 @@ fn run() -> ExitCode {
     };
     let path = Path::new(directory);
     let started = Instant::now();
-    let (mut listing, _) = match enumerate(ListingOptions {
-        volume: VolumeId::from_directory(&path),
-        directory: path,
-        batch_size: 0,
-        network_timeout: None,
-    }) {
-        Ok(pair) => pair,
+    let mut opened = match Shell::new().open(VolumeId::from_directory(&path), path) {
+        Ok(opened) => opened,
         Err(err) => {
             eprintln!("enumeration failed to start: {err}");
             return ExitCode::from(1);
@@ -45,15 +40,19 @@ fn run() -> ExitCode {
     let mut count = 0usize;
     let mut first_batch = None;
     let terminal = loop {
-        match listing.try_recv() {
-            TryEvent::Ready(ListingEvent::Batch(entries)) => {
+        match opened.poll() {
+            Ok(TryEvent::Ready(ListingEvent::Batch(entries))) => {
                 if first_batch.is_none() {
                     first_batch = Some(started.elapsed());
                 }
                 count += entries.len();
             }
-            TryEvent::Ready(event) => break event,
-            TryEvent::Pending => thread::sleep(Duration::from_millis(1)),
+            Ok(TryEvent::Ready(event)) => break event,
+            Ok(TryEvent::Pending) => thread::sleep(Duration::from_millis(1)),
+            Err(err) => {
+                eprintln!("enumeration failed: {err}");
+                return ExitCode::from(1);
+            }
         }
     };
     let full = started.elapsed();

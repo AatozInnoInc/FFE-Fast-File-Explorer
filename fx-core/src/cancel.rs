@@ -18,6 +18,7 @@ impl CancellationToken {
         self.cancelled.store(true, Ordering::Release);
     }
 
+    #[cfg_attr(not(any(test, windows)), allow(dead_code))]
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
