@@ -8,7 +8,7 @@ Windows 11 File Explorer is slow to render even on a fresh install because of la
 
 ## Status
 
-`fx-core` enumerates directories with one worker per volume, caches a finished listing, and exposes `shell` (open, poll, cancel) for the in-process Win32 shell. The UI is not started. See `docs/ROADMAP.md`.
+`fx-core` enumerates directories with one worker per volume, caches a finished listing, and exposes `shell` (open, poll, cancel). `list_shell` is a Win32 `SysListView32` in virtual mode for one directory. It calls `shell` in-process. There is no tree, address bar, icon, or context menu yet. See `docs/ROADMAP.md`.
 
 ## Getting started
 
@@ -17,6 +17,14 @@ The enumeration core is the `fx-core` crate. From that directory:
 ```
 cargo test
 ```
+
+On Windows, open one directory in the list window:
+
+```
+cargo run --bin list_shell -- C:\some\directory
+```
+
+A cache hit paints stored names before the live listing finishes.
 
 On Windows, measure a real directory with:
 
