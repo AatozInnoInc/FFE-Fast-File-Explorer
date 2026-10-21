@@ -1,6 +1,6 @@
 # Windows File Explorer — Coding Agent Handoff
 
-Status as of 2026-10-19. Owner: AatozInnoInc. Phase: `fx-core` enumerates directories, caches finished listings, and exposes the in-process `shell` module. `list_shell` shows one directory in a virtual `SysListView32`. Eviction is `TODO — define`. The tree, address bar, icons, and context menu are not started. SSD budgets are not measured. The UI/visual system exists as an HTML prototype. `theme-reference.html` is not in the repository.
+Status as of 2026-10-21. Owner: AatozInnoInc. Phase: `fx-core` enumerates directories, caches finished listings, and exposes the in-process `shell` module. `list_shell` shows one directory in a virtual `SysListView32` with a `SysTreeView32` of that directory's child folders. Eviction is `TODO — define`. The address bar, icons, and context menu are not started. Choosing a tree folder does not change the list yet. SSD budgets are not measured. The UI/visual system exists as an HTML prototype. `theme-reference.html` is not in the repository.
 
 ---
 
@@ -73,7 +73,7 @@ Shared kernel: `FileEntry`, `Path`, `VolumeId`.
 The split memory budget is deliberate: idle must stay low so leaks are detectable; active use may be generous for aggressive caching. Primary hardware target: SSD systems.
 
 ### Navigation control flow
-Cache hit is an explicit early exit (paint from cache, revalidate in background). Cache miss goes to that volume's worker, streams first batch for first paint, then fills. `list_shell` is that path for one directory.
+Cache hit is an explicit early exit (paint from cache, revalidate in background). Cache miss goes to that volume's worker, streams first batch for first paint, then fills. `list_shell` is that path for one directory. Its tree lists a folder's direct child directories only after that node expands.
 
 ---
 
@@ -176,7 +176,7 @@ Implementation mapping: the HTML demo uses a `--sp` scale variable, Web Animatio
 
 - Design package is in this repository (`AatozInnoInc/FFE-Fast-File-Explorer`) as of 2026-10-19. It was drafted in Perplexity sessions on 2026-08-31 and 2026-09-22. Files: `README.md`, `CONTRIBUTING.md`, `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`, `docs/HANDOFF.md`, `docs/charts/context-map.md`, `docs/charts/navigation-flow.md`, `docs/theme-motion-spec.md`.
 - Enumeration crate: `fx-core/`. Windows directory reads use `FindFirstFileExW`. Portable tests use a scripted source. SSD budget numbers are not measured yet. Run `fx-core/examples/measure_listing.rs` on a Windows SSD when a real directory is available.
-- List window: `fx-core/src/bin/list_shell.rs`. One directory, virtual `SysListView32`, calls `fx_core::shell` only. Windows only.
+- List window: `fx-core/src/bin/list_shell.rs`. One directory in a virtual `SysListView32`, plus a `SysTreeView32` of child folders filled on expand. Calls `fx_core::shell` only. Windows only. Selecting a tree folder does not change the list.
 - Interactive HTML preview: Halo (8 palettes, Copper default), Lozenge, Deck, Strata, Vellum, with all 29 animations, a demo dock, reduced-motion toggle, and 0.25×–3× speed slider. `theme-reference.html` is still absent from the repository. The written spec is `docs/theme-motion-spec.md`.
 - Workflow templates: `AatozInnoInc/principal-engineer-skills/skills/autonomous-agentic-design-workflow/`.
 
@@ -229,12 +229,18 @@ Implementation mapping: the HTML demo uses a `--sp` scale variable, Web Animatio
 
 **Completed prompt.** Added `list_shell`, a Win32 window with one `SysListView32` in virtual/owner-data mode for one directory. It fills that list from `Shell::open` and `poll`. A cache hit sets the owner-data count and paints before the first `poll`. A miss appends batches. A revalidation replaces rows only when the finished listing differs; timeout, cancel, and failure keep the rows already shown. `LVN_GETDISPINFO` writes the name of the row the control asks for. The message loop is `GetMessageW`. `poll` runs from a timer and does not wait, so a slow volume does not stall the window. Closing the window cancels the live listing. The UI thread does not enumerate. No tree, address bar, icons, context menu, IPC, or C ABI. Questions 1–6 stay open. Eviction and the SSD budgets were not invented.
 
+### 2026-10-21T05:13:23Z — Folder tree beside the list
+
+**Signed off by:** Grok 4.7, implementation pass.
+
+**Completed prompt.** Added a `SysTreeView32` beside the list in `list_shell`. The open directory is the root and starts collapsed. Expanding a node calls `Shell::open` and `poll` for that directory only. Child items are directories already returned; grandchildren are not inserted until those nodes expand. A cache hit inserts those names before the first `poll`. A miss inserts them as batches arrive. Timeout, cancel, and failure keep the names already shown. The same `Shell` serves the list and the tree, so a finished list is a cache hit for that directory. A busy volume refuses the expand and does not block the message loop. There is no Network neighborhood. Selecting a tree folder does not change the list. No address bar, icons, context menu, IPC, or C ABI. Questions 1–6 stay open. Eviction and the SSD budgets were not invented.
+
 ---
 
 ## 11. Prompt for Next Agent
 
-> The list window is `fx-core`'s `list_shell` binary. It calls `fx_core::shell` in-process. Do not add IPC or a C ABI. Do not bypass `shell` with `ListingCache` or `enumerate`.
+> The window is `fx-core`'s `list_shell` binary. The list shows the directory given on the command line. The tree shows that directory and, on expand, its child folders. Selecting a tree folder does not change the list. Both call `fx_core::shell` in-process. Do not add IPC or a C ABI. Do not bypass `shell` with `ListingCache` or `enumerate`.
 >
-> Add a `SysTreeView32` beside that list. `SysTreeView32` has no owner-data style. Show the open directory as the root. Fill a node's children through `Shell::open` and `poll` only when that node expands, and insert only the children already returned. Do not insert grandchildren until those nodes expand. A cache hit paints those children before `poll` finishes. The UI thread never enumerates, and a slow volume does not stall the window. Do not enumerate a Network neighborhood; a network directory appears only when it is the directory the user opened.
+> Add navigation. Choosing a folder in the tree lists that directory in the `SysListView32`. A one-line address bar accepts a path and lists it the same way. Back and forward revisit directories this window already opened. A cache hit paints the list before `poll` finishes. The UI thread never enumerates, and a slow volume does not stall the window. Do not enumerate a Network neighborhood; a network directory appears only when the user chooses that path.
 >
-> Do not build the address bar, icons, or context menu. Do not decide questions 1–6. Do not invent an eviction size. SSD budgets are still unmeasured; do not invent those numbers. Reduced motion and the theme system are out of this slice.
+> Do not build icons or a context menu. Do not decide questions 1–6. Do not invent an eviction size. SSD budgets are still unmeasured; do not invent those numbers. Reduced motion and the theme system are out of this slice.
