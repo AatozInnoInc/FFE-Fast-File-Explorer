@@ -5,6 +5,7 @@
 //! window paints, before the first `poll`.
 
 mod rows;
+mod tree;
 
 #[cfg(windows)]
 mod window;
