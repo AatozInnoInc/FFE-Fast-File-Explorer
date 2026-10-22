@@ -3,7 +3,8 @@
 //! The message loop is `GetMessageW`. Enumeration is `Shell::poll` on a timer.
 //! That call does not wait, and this thread does not read a directory. Choosing
 //! a folder, typing a path, or going back lists that directory. A cache hit sets
-//! the owner-data count and paints before the next `poll`.
+//! the owner-data count and paints before the next `poll`. A row's icon comes
+//! from one cached image per extension, or one shared directory icon.
 
 use std::mem;
 use std::process::ExitCode;
@@ -14,35 +15,44 @@ use windows_sys::Win32::Foundation::{
     GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
 use windows_sys::Win32::Graphics::Gdi::{UpdateWindow, COLOR_WINDOW, HBRUSH};
+use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
+use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{
-    InitCommonControlsEx, HTREEITEM, ICC_LISTVIEW_CLASSES, ICC_TREEVIEW_CLASSES,
-    INITCOMMONCONTROLSEX, LVCFMT_LEFT, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIF_TEXT,
+    ImageList_Create, ImageList_ReplaceIcon, InitCommonControlsEx, HIMAGELIST, HTREEITEM,
+    ICC_LISTVIEW_CLASSES, ICC_TREEVIEW_CLASSES, ILC_COLOR32, ILC_MASK, INITCOMMONCONTROLSEX,
+    I_IMAGENONE, LVCFMT_LEFT, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT,
     LVM_INSERTCOLUMNW, LVM_REDRAWITEMS, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE,
-    LVM_SETITEMCOUNT, LVN_GETDISPINFOW, LVN_ITEMACTIVATE, LVSICF_NOSCROLL, LVS_EX_DOUBLEBUFFER,
-    LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_OWNERDATA, LVS_REPORT, LVS_SHOWSELALWAYS, NMHDR,
-    NMLISTVIEW, NMLVDISPINFOW, NMTREEVIEWW, TVE_COLLAPSE, TVE_EXPAND, TVGN_CARET, TVIF_CHILDREN,
-    TVIF_HANDLE, TVIF_PARAM, TVIF_TEXT, TVINSERTSTRUCTW, TVINSERTSTRUCTW_0, TVITEMW, TVI_LAST,
-    TVI_ROOT, TVM_DELETEITEM, TVM_INSERTITEMW, TVM_SELECTITEM, TVM_SETITEMW, TVN_ITEMEXPANDINGW,
-    TVN_SELCHANGEDW, TVS_DISABLEDRAGDROP, TVS_HASBUTTONS, TVS_HASLINES, TVS_LINESATROOT,
-    TVS_SHOWSELALWAYS, WC_BUTTONW, WC_EDITW, WC_LISTVIEWW, WC_TREEVIEWW,
+    LVM_SETIMAGELIST, LVM_SETITEMCOUNT, LVN_GETDISPINFOW, LVN_ITEMACTIVATE, LVSICF_NOSCROLL,
+    LVSIL_SMALL, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_OWNERDATA,
+    LVS_REPORT, LVS_SHOWSELALWAYS, NMHDR, NMLISTVIEW, NMLVDISPINFOW, NMTREEVIEWW, TVE_COLLAPSE,
+    TVE_EXPAND, TVGN_CARET, TVIF_CHILDREN, TVIF_HANDLE, TVIF_PARAM, TVIF_TEXT, TVINSERTSTRUCTW,
+    TVINSERTSTRUCTW_0, TVITEMW, TVI_LAST, TVI_ROOT, TVM_DELETEITEM, TVM_INSERTITEMW,
+    TVM_SELECTITEM, TVM_SETITEMW, TVN_ITEMEXPANDINGW, TVN_SELCHANGEDW, TVS_DISABLEDRAGDROP,
+    TVS_HASBUTTONS, TVS_HASLINES, TVS_LINESATROOT, TVS_SHOWSELALWAYS, WC_BUTTONW, WC_EDITW,
+    WC_LISTVIEWW, WC_TREEVIEWW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, SetFocus, VK_LEFT, VK_RETURN, VK_RIGHT,
 };
+use windows_sys::Win32::UI::Shell::{
+    SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_SMALLICON, SHGFI_USEFILEATTRIBUTES,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetAncestor, GetClientRect,
-    GetMessageW, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, KillTimer, LoadCursorW,
-    MoveWindow, PostQuitMessage, RegisterClassW, SendMessageW, SetTimer, SetWindowLongPtrW,
-    SetWindowTextW, ShowWindow, TranslateMessage, BN_CLICKED, BS_PUSHBUTTON, CS_HREDRAW,
-    CS_VREDRAW, CW_USEDEFAULT, ES_AUTOHSCROLL, GA_ROOT, GWLP_USERDATA, HMENU, IDC_ARROW, MSG,
-    SIZE_MINIMIZED, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_DESTROY, WM_KEYDOWN,
-    WM_NOTIFY, WM_SIZE, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN,
-    WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+    CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW, GetAncestor,
+    GetClientRect, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowTextLengthW,
+    GetWindowTextW, KillTimer, LoadCursorW, MoveWindow, PostQuitMessage, RegisterClassW,
+    SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowTextW, ShowWindow, TranslateMessage,
+    BN_CLICKED, BS_PUSHBUTTON, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, ES_AUTOHSCROLL, GA_ROOT,
+    GWLP_USERDATA, HMENU, IDC_ARROW, MSG, SIZE_MINIMIZED, SM_CXSMICON, SM_CYSMICON, SW_SHOW,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_DESTROY, WM_KEYDOWN, WM_NOTIFY, WM_SIZE,
+    WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN, WS_EX_CLIENTEDGE,
+    WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
 
 use fx_core::{EnumError, OpenedDirectory, Path, Shell, VolumeId};
 
+use crate::icons::{icon_key, IconCache, IconKey};
 use crate::nav::{normalize_address, same_directory, tree_root, History, TreeRoot};
 use crate::rows::{DirectoryRows, RowChange};
 use crate::tree::{child_directory, ChildChange, Expansion};
@@ -82,6 +92,10 @@ struct ListWindow {
     suppress_select: bool,
     opened: Option<OpenedDirectory>,
     rows: DirectoryRows,
+    /// Image-list indexes. One directory icon, and one icon per extension.
+    icons: IconCache<i32>,
+    /// Small-icon image list owned by the list view. Zero when it was not created.
+    images: HIMAGELIST,
     nodes: Vec<FolderNode>,
     /// The timer is running. This is not "the list is still reading".
     polling: bool,
@@ -243,6 +257,7 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
         );
     }
     insert_name_column(list);
+    let images = create_image_list(list);
 
     let tree = create_control(
         hwnd,
@@ -297,6 +312,8 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
         suppress_select: false,
         opened: start.opened,
         rows: start.rows,
+        icons: IconCache::new(),
+        images,
         nodes: Vec::new(),
         polling,
     });
@@ -863,19 +880,121 @@ fn on_notify(hwnd: HWND, lparam: LPARAM) -> LRESULT {
 fn on_list_dispinfo(hwnd: HWND, lparam: LPARAM) {
     let info = unsafe { &mut *(lparam as *mut NMLVDISPINFOW) };
     let item = &mut info.item;
-    if item.iSubItem != 0 || item.iItem < 0 || (item.mask & LVIF_TEXT) == 0 {
+    if item.iSubItem != 0 || item.iItem < 0 {
+        return;
+    }
+    let wants_text = item.mask & LVIF_TEXT != 0;
+    let wants_image = item.mask & LVIF_IMAGE != 0;
+    if !wants_text && !wants_image {
         return;
     }
     let index = item.iItem as usize;
     let buffer = item.pszText;
     let capacity = item.cchTextMax;
-    let Some(state) = state_mut(hwnd) else {
-        return;
-    };
-    match state.rows.shown().get(index) {
-        Some(entry) => write_name(buffer, capacity, &entry.name),
-        None => write_name(buffer, capacity, ""),
+    let row = state_mut(hwnd).and_then(|state| {
+        state
+            .rows
+            .shown()
+            .get(index)
+            .map(|entry| (entry.name.clone(), entry.is_directory))
+    });
+    if wants_text {
+        match &row {
+            Some((name, _)) => write_name(buffer, capacity, name),
+            None => write_name(buffer, capacity, ""),
+        }
     }
+    if wants_image {
+        item.iImage = match &row {
+            Some((name, is_directory)) => cached_icon(hwnd, name, *is_directory),
+            None => I_IMAGENONE,
+        };
+    }
+}
+
+/// The image list index for this row. `SHGetFileInfoW` runs once per [`IconKey`].
+/// The borrow of the window is dropped first, because that call can reenter.
+fn cached_icon(hwnd: HWND, name: &str, is_directory: bool) -> i32 {
+    let key = icon_key(name, is_directory);
+    if let Some(index) = state_mut(hwnd).and_then(|state| state.icons.get(&key).copied()) {
+        return index;
+    }
+    let Some(images) = state_mut(hwnd)
+        .map(|state| state.images)
+        .filter(|images| *images != 0)
+    else {
+        return I_IMAGENONE;
+    };
+    let index = load_shell_icon(images, &key);
+    state_mut(hwnd)
+        .map(|state| *state.icons.get_or_insert_with(key, || index))
+        .unwrap_or(index)
+}
+
+fn create_image_list(list: HWND) -> HIMAGELIST {
+    let mut cx = unsafe { GetSystemMetrics(SM_CXSMICON) };
+    let mut cy = unsafe { GetSystemMetrics(SM_CYSMICON) };
+    if cx <= 0 {
+        cx = 16;
+    }
+    if cy <= 0 {
+        cy = 16;
+    }
+    let images = unsafe { ImageList_Create(cx, cy, ILC_COLOR32 | ILC_MASK, 4, 4) };
+    if images != 0 {
+        unsafe {
+            SendMessageW(list, LVM_SETIMAGELIST, LVSIL_SMALL as WPARAM, images);
+        }
+    }
+    images
+}
+
+/// Attributes only. The name is synthetic, so this does not open the file.
+fn load_shell_icon(images: HIMAGELIST, key: &IconKey) -> i32 {
+    ensure_com();
+    let (label, attributes) = match key {
+        IconKey::Directory => ("folder".to_string(), FILE_ATTRIBUTE_DIRECTORY),
+        IconKey::File => ("file".to_string(), FILE_ATTRIBUTE_NORMAL),
+        IconKey::Extension(extension) => (format!("file.{extension}"), FILE_ATTRIBUTE_NORMAL),
+    };
+    let wide_name = wide(&label);
+    let mut info = SHFILEINFOW {
+        hIcon: ptr::null_mut(),
+        iIcon: 0,
+        dwAttributes: 0,
+        szDisplayName: [0; 260],
+        szTypeName: [0; 80],
+    };
+    let flags = SHGFI_USEFILEATTRIBUTES | SHGFI_ICON | SHGFI_SMALLICON;
+    let found = unsafe {
+        SHGetFileInfoW(
+            wide_name.as_ptr(),
+            attributes,
+            &mut info,
+            mem::size_of::<SHFILEINFOW>() as u32,
+            flags,
+        )
+    };
+    if found == 0 || info.hIcon.is_null() {
+        return I_IMAGENONE;
+    }
+    let index = unsafe { ImageList_ReplaceIcon(images, -1, info.hIcon) };
+    unsafe {
+        DestroyIcon(info.hIcon);
+    }
+    if index < 0 {
+        I_IMAGENONE
+    } else {
+        index
+    }
+}
+
+fn ensure_com() {
+    use std::sync::Once;
+    static START: Once = Once::new();
+    START.call_once(|| {
+        let _ = unsafe { CoInitializeEx(ptr::null(), COINIT_APARTMENTTHREADED as u32) };
+    });
 }
 
 fn on_item_activate(hwnd: HWND, lparam: LPARAM) {

@@ -8,7 +8,7 @@ Windows 11 File Explorer is slow to render even on a fresh install because of la
 
 ## Status
 
-`fx-core` enumerates directories with one worker per volume, caches a finished listing, and exposes `shell` (open, poll, cancel). `list_shell` is a Win32 `SysListView32` in virtual mode, with a `SysTreeView32` of child folders, a one-line address bar, and Back/Forward. Expanding a folder lists its children through `shell`. Choosing a folder, entering a path, or going back lists that directory. There is no icon or context menu yet. See `docs/ROADMAP.md`.
+`fx-core` enumerates directories with one worker per volume, caches a finished listing, and exposes `shell` (open, poll, cancel). `list_shell` is a Win32 `SysListView32` in virtual mode, with a `SysTreeView32` of child folders, a one-line address bar, and Back/Forward. Expanding a folder lists its children through `shell`. Choosing a folder, entering a path, or going back lists that directory. Painted rows show a small icon cached by extension. There is no context menu yet. See `docs/ROADMAP.md`.
 
 ## Getting started
 
@@ -24,7 +24,7 @@ On Windows, open one directory in the list window:
 cargo run --bin list_shell -- C:\some\directory
 ```
 
-A cache hit paints stored names before the live listing finishes. The tree starts collapsed. Expand a folder to list its child directories. The first expand of the open directory waits until the list's listing of that same volume finishes, then paints from the cache. Choose a tree folder, double-click a directory in the list, or press Enter in the address bar to list that path. Back and Forward (and Alt+Left / Alt+Right) revisit directories this window already opened. If that volume is busy, the current list stays and the window retries without freezing.
+A cache hit paints stored names before the live listing finishes. The tree starts collapsed. Expand a folder to list its child directories. The first expand of the open directory waits until the list's listing of that same volume finishes, then paints from the cache. Choose a tree folder, double-click a directory in the list, or press Enter in the address bar to list that path. Back and Forward (and Alt+Left / Alt+Right) revisit directories this window already opened. If that volume is busy, the current list stays and the window retries without freezing. Icons are looked up once per extension, not once per file.
 
 On Windows, measure a real directory with:
 
