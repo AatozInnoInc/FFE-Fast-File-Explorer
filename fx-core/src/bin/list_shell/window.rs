@@ -4,7 +4,8 @@
 //! That call does not wait, and this thread does not read a directory. Choosing
 //! a folder, typing a path, or going back lists that directory. A cache hit sets
 //! the owner-data count and paints before the next `poll`. A row's icon comes
-//! from one cached image per extension, or one shared directory icon.
+//! from one cached image per extension, or one shared directory icon. A Network
+//! node stays collapsed until the user expands it.
 
 use std::mem;
 use std::process::ExitCode;
@@ -50,10 +51,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
 
-use fx_core::{EnumError, OpenedDirectory, Path, Shell, VolumeId};
+use fx_core::{EnumError, NetworkBrowse, NetworkPlace, OpenedDirectory, Path, Shell, VolumeId};
 
 use crate::icons::{icon_key, IconCache, IconKey};
 use crate::nav::{normalize_address, same_directory, tree_root, History, TreeRoot};
+use crate::places::{PlaceChange, PlaceList};
 use crate::rows::{DirectoryRows, RowChange};
 use crate::tree::{child_directory, ChildChange, Expansion};
 
@@ -72,6 +74,7 @@ const ID_TREE: isize = 2;
 const ID_BACK: isize = 3;
 const ID_FORWARD: isize = 4;
 const ID_ADDRESS: isize = 5;
+const NETWORK_LABEL: &str = "Network";
 const CLASS_NAME: windows_sys::core::PCWSTR = w!("RapidExplorerList");
 
 struct ListWindow {
@@ -103,11 +106,26 @@ struct ListWindow {
 
 struct FolderNode {
     path: String,
+    kind: NodeKind,
     item: HTREEITEM,
     child_indices: Vec<usize>,
     expansion: Option<Expansion>,
     opened: Option<OpenedDirectory>,
+    places: Option<PlaceList>,
+    browse: Option<NetworkBrowse>,
     removed: bool,
+}
+
+#[derive(Clone)]
+enum NodeKind {
+    Directory,
+    /// Collapsed until the user expands it. Not a child of the opened directory.
+    NetworkRoot,
+    /// A place from a browse. A container expands. A share with a UNC lists that path.
+    Place {
+        unc: Option<String>,
+        container: bool,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -126,12 +144,33 @@ struct PendingNav {
 
 impl FolderNode {
     fn new(path: String) -> Self {
+        Self::blank(path, NodeKind::Directory)
+    }
+
+    fn network() -> Self {
+        Self::blank(String::new(), NodeKind::NetworkRoot)
+    }
+
+    fn place(place: &NetworkPlace) -> Self {
+        Self::blank(
+            String::new(),
+            NodeKind::Place {
+                unc: place.unc.clone(),
+                container: place.container,
+            },
+        )
+    }
+
+    fn blank(path: String, kind: NodeKind) -> Self {
         Self {
             path,
+            kind,
             item: 0,
             child_indices: Vec::new(),
             expansion: None,
             opened: None,
+            places: None,
+            browse: None,
             removed: false,
         }
     }
@@ -322,6 +361,7 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(state) as isize);
     }
     insert_root(hwnd, &root);
+    insert_network(hwnd);
     update_nav_buttons(hwnd);
 
     fit_panes(hwnd);
@@ -665,9 +705,7 @@ fn replace_tree_root(hwnd: HWND, path: &str) {
     if let Some(state) = state_mut(hwnd) {
         state.suppress_select = true;
         for node in &mut state.nodes {
-            if let Some(opened) = node.opened.take() {
-                opened.cancel();
-            }
+            cancel_node(node);
         }
     }
     unsafe {
@@ -679,6 +717,7 @@ fn replace_tree_root(hwnd: HWND, path: &str) {
         state.suppress_select = false;
     }
     insert_root(hwnd, path);
+    insert_network(hwnd);
 }
 
 fn select_node(hwnd: HWND, index: usize) {
@@ -770,12 +809,18 @@ fn on_timer(hwnd: HWND) {
         let (tree_changes, settled_nodes) = drain_tree(state);
         let idle = state.pending.is_none()
             && state.rows.is_settled()
-            && state.nodes.iter().all(|node| node.opened.is_none());
+            && state
+                .nodes
+                .iter()
+                .all(|node| node.opened.is_none() && node.browse.is_none());
         (change, shown, tree_changes, settled_nodes, idle)
     };
     paint(list, change, shown);
     for (index, child_change) in tree_changes {
-        apply_children(hwnd, index, child_change);
+        match child_change {
+            NodeChange::Directories(change) => apply_children(hwnd, index, change),
+            NodeChange::Places(places) => insert_places(hwnd, index, &places),
+        }
     }
     for index in settled_nodes {
         sync_expander(hwnd, index);
@@ -788,11 +833,31 @@ fn on_timer(hwnd: HWND) {
     }
 }
 
-fn drain_tree(state: &mut ListWindow) -> (Vec<(usize, ChildChange)>, Vec<usize>) {
+enum NodeChange {
+    Directories(ChildChange),
+    Places(Vec<NetworkPlace>),
+}
+
+fn drain_tree(state: &mut ListWindow) -> (Vec<(usize, NodeChange)>, Vec<usize>) {
     let mut changes = Vec::new();
     let mut settled = Vec::new();
     for index in 0..state.nodes.len() {
         if state.nodes[index].removed {
+            continue;
+        }
+        if state.nodes[index].places.is_some() {
+            let change = drain_places(&mut state.nodes[index]);
+            if state.nodes[index]
+                .places
+                .as_ref()
+                .is_some_and(PlaceList::is_settled)
+            {
+                state.nodes[index].browse = None;
+                settled.push(index);
+            }
+            if let PlaceChange::Append(places) = change {
+                changes.push((index, NodeChange::Places(places)));
+            }
             continue;
         }
         let change = drain_node(&mut state.nodes[index]);
@@ -805,10 +870,24 @@ fn drain_tree(state: &mut ListWindow) -> (Vec<(usize, ChildChange)>, Vec<usize>)
             settled.push(index);
         }
         if change != ChildChange::Unchanged {
-            changes.push((index, change));
+            changes.push((index, NodeChange::Directories(change)));
         }
     }
     (changes, settled)
+}
+
+fn drain_places(node: &mut FolderNode) -> PlaceChange {
+    let FolderNode { places, browse, .. } = node;
+    let Some(places) = places.as_mut() else {
+        return PlaceChange::Unchanged;
+    };
+    let Some(browse) = browse.as_mut() else {
+        if !places.is_settled() {
+            places.stop();
+        }
+        return PlaceChange::Unchanged;
+    };
+    places.apply_available(|| browse.try_recv())
 }
 
 fn drain_node(node: &mut FolderNode) -> ChildChange {
@@ -1029,7 +1108,7 @@ fn on_selection(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     let Some(index) = find_node(hwnd, item) else {
         return 0;
     };
-    let Some(path) = node_path(hwnd, index) else {
+    let Some(path) = navigable_path(hwnd, index) else {
         return 0;
     };
     if state_mut(hwnd).is_some_and(|state| same_directory(&state.current, &path)) {
@@ -1049,10 +1128,31 @@ fn on_item_expanding(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     let Some(index) = find_node(hwnd, item) else {
         return 0;
     };
-    let already = state_mut(hwnd).is_some_and(|state| state.nodes[index].expansion.is_some());
-    if already {
+    let Some(kind) = expand_kind(hwnd, index) else {
         return 0;
+    };
+    match kind {
+        NodeKind::Directory => expand_directory(hwnd, index),
+        NodeKind::NetworkRoot => start_browse(hwnd, index, None),
+        NodeKind::Place {
+            container: true,
+            unc: Some(unc),
+        } => start_browse(hwnd, index, Some(unc.as_str())),
+        NodeKind::Place { .. } => 1,
     }
+}
+
+/// `None` means this node already started, so the expand is allowed.
+fn expand_kind(hwnd: HWND, index: usize) -> Option<NodeKind> {
+    let state = state_mut(hwnd)?;
+    let node = state.nodes.get(index)?;
+    if node.expansion.is_some() || node.places.is_some() {
+        return None;
+    }
+    Some(node.kind.clone())
+}
+
+fn expand_directory(hwnd: HWND, index: usize) -> LRESULT {
     let Some(path) = node_path(hwnd, index) else {
         return 1;
     };
@@ -1065,6 +1165,19 @@ fn on_item_expanding(hwnd: HWND, lparam: LPARAM) -> LRESULT {
         Err(_) => return 1,
     };
     begin_expansion(hwnd, index, opened);
+    0
+}
+
+fn start_browse(hwnd: HWND, index: usize, parent: Option<&str>) -> LRESULT {
+    let browse = match Shell::browse_network(parent) {
+        Ok(browse) => browse,
+        Err(_) => return 1,
+    };
+    if let Some(state) = state_mut(hwnd) {
+        state.nodes[index].places = Some(PlaceList::start());
+        state.nodes[index].browse = Some(browse);
+    }
+    ensure_timer(hwnd);
     0
 }
 
@@ -1094,6 +1207,25 @@ fn apply_children(hwnd: HWND, index: usize, change: ChildChange) {
         }
     }
     sync_expander(hwnd, index);
+}
+
+/// The Network root is not a child of the opened directory, and it is not browsed here.
+fn insert_network(hwnd: HWND) {
+    let Some(tree) = tree_handle(hwnd) else {
+        return;
+    };
+    let index = {
+        let Some(state) = state_mut(hwnd) else {
+            return;
+        };
+        let index = state.nodes.len();
+        state.nodes.push(FolderNode::network());
+        index
+    };
+    let item = insert_tree_item(tree, TVI_ROOT, NETWORK_LABEL, 1, index);
+    if let Some(state) = state_mut(hwnd) {
+        state.nodes[index].item = item;
+    }
 }
 
 fn insert_root(hwnd: HWND, path: &str) {
@@ -1139,6 +1271,38 @@ fn insert_directories(hwnd: HWND, parent: usize, names: &[String]) {
     }
 }
 
+fn insert_places(hwnd: HWND, parent: usize, places: &[NetworkPlace]) {
+    let Some((tree, parent_item, _)) = node_insert_target(hwnd, parent) else {
+        return;
+    };
+    for place in places {
+        if place.name.is_empty() {
+            continue;
+        }
+        let expandable = place.container && place.unc.is_some();
+        let index = {
+            let Some(state) = state_mut(hwnd) else {
+                return;
+            };
+            let index = state.nodes.len();
+            state.nodes.push(FolderNode::place(place));
+            index
+        };
+        let item = insert_tree_item(
+            tree,
+            parent_item,
+            &place.name,
+            i32::from(u8::from(expandable)),
+            index,
+        );
+        if let Some(state) = state_mut(hwnd) {
+            state.nodes[index].item = item;
+            state.nodes[parent].child_indices.push(index);
+        }
+    }
+    sync_expander(hwnd, parent);
+}
+
 fn delete_children(hwnd: HWND, parent: usize) {
     let children = {
         let Some(state) = state_mut(hwnd) else {
@@ -1182,10 +1346,17 @@ fn take_removed_item(hwnd: HWND, index: usize) -> Option<(HWND, HTREEITEM)> {
         return None;
     }
     node.removed = true;
+    cancel_node(node);
+    Some((tree, node.item))
+}
+
+fn cancel_node(node: &mut FolderNode) {
     if let Some(opened) = node.opened.take() {
         opened.cancel();
     }
-    Some((tree, node.item))
+    if let Some(browse) = node.browse.take() {
+        browse.cancel();
+    }
 }
 
 fn sync_expander(hwnd: HWND, index: usize) {
@@ -1206,7 +1377,8 @@ fn expander_state(hwnd: HWND, index: usize) -> Option<(HWND, HTREEITEM, bool, bo
         return None;
     }
     let empty = node.child_indices.is_empty();
-    let settled = node.expansion.as_ref().is_some_and(Expansion::is_settled);
+    let settled = node.expansion.as_ref().is_some_and(Expansion::is_settled)
+        || node.places.as_ref().is_some_and(PlaceList::is_settled);
     Some((tree, node.item, empty, settled))
 }
 
@@ -1282,10 +1454,27 @@ fn ensure_timer(hwnd: HWND) {
 fn node_path(hwnd: HWND, index: usize) -> Option<String> {
     let state = state_mut(hwnd)?;
     let node = state.nodes.get(index)?;
-    if node.removed {
+    if node.removed || !matches!(node.kind, NodeKind::Directory) {
         None
     } else {
         Some(node.path.clone())
+    }
+}
+
+/// A directory, or a connectable share. Containers and the Network root do not list.
+fn navigable_path(hwnd: HWND, index: usize) -> Option<String> {
+    let state = state_mut(hwnd)?;
+    let node = state.nodes.get(index)?;
+    if node.removed {
+        return None;
+    }
+    match &node.kind {
+        NodeKind::Directory => Some(node.path.clone()),
+        NodeKind::Place {
+            unc,
+            container: false,
+        } => unc.clone(),
+        NodeKind::NetworkRoot | NodeKind::Place { .. } => None,
     }
 }
 
@@ -1320,10 +1509,11 @@ fn find_node(hwnd: HWND, item: HTREEITEM) -> Option<usize> {
 
 fn find_node_path(hwnd: HWND, path: &str) -> Option<usize> {
     let state = state_mut(hwnd)?;
-    state
-        .nodes
-        .iter()
-        .position(|node| !node.removed && same_directory(&node.path, path))
+    state.nodes.iter().position(|node| {
+        !node.removed
+            && matches!(node.kind, NodeKind::Directory)
+            && same_directory(&node.path, path)
+    })
 }
 
 fn tree_handle(hwnd: HWND) -> Option<HWND> {
@@ -1379,6 +1569,9 @@ fn on_destroy(hwnd: HWND) {
         for node in &state.nodes {
             if let Some(opened) = &node.opened {
                 opened.cancel();
+            }
+            if let Some(browse) = &node.browse {
+                browse.cancel();
             }
         }
         drop(state);

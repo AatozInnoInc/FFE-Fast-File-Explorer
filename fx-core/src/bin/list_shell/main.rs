@@ -6,6 +6,7 @@
 
 mod icons;
 mod nav;
+mod places;
 mod rows;
 mod tree;
 
