@@ -8,6 +8,7 @@ mod cache;
 mod cancel;
 pub mod dump;
 mod enumerate;
+pub mod filename_index;
 pub mod helper;
 mod kernel;
 mod network;
