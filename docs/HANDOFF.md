@@ -1,6 +1,6 @@
 # Windows File Explorer — Coding Agent Handoff
 
-Status as of 2026-10-22. Owner: AatozInnoInc. Phase: `fx-core` enumerates directories, caches finished listings, and exposes the in-process `shell` module. `list_shell` shows a directory in a virtual `SysListView32`, with a `SysTreeView32`, a one-line address bar, Back/Forward, and a collapsed Network node. Choosing a tree folder, activating a directory row, entering a path, or choosing a connectable share lists that directory. Each painted row uses a small icon cached by extension, with one shared directory icon. The Network node stays empty until the user expands it. Eviction of directory listings is `TODO — define`. The context menu is not started. SSD budgets are not measured. The UI/visual system exists as an HTML prototype. `theme-reference.html` is not in the repository.
+Status as of 2026-10-23. Owner: AatozInnoInc. Phase: `fx-core` enumerates directories, caches finished listings, and exposes the in-process `shell` module. `list_shell` shows a directory in a virtual `SysListView32`, with a `SysTreeView32`, a one-line address bar, Back/Forward, and a collapsed Network node. Choosing a tree folder, activating a directory row, entering a path, or choosing a connectable share lists that directory. Each painted row uses a small icon cached by extension, with one shared directory icon. Size and Date modified are DirectWrite cells; the Name column stays native so that icon remains. The Network node stays empty until the user expands it. Eviction of directory listings is `TODO — define`. The context menu is not started. SSD budgets are not measured. The UI/visual system exists as an HTML prototype. `theme-reference.html` is not in the repository.
 
 ---
 
@@ -73,7 +73,7 @@ Shared kernel: `FileEntry`, `Path`, `VolumeId`.
 The split memory budget is deliberate: idle must stay low so leaks are detectable; active use may be generous for aggressive caching. Primary hardware target: SSD systems.
 
 ### Navigation control flow
-Cache hit is an explicit early exit (paint from cache, revalidate in background). Cache miss goes to that volume's worker, streams first batch for first paint, then fills. `list_shell` is that path. Its tree lists a folder's direct child directories only after that node expands. Tree selection, the address bar, Back, and Forward open a directory the same way. A busy volume leaves the current list in place and retries from the timer. The Network node is a separate browse: it stays collapsed until expanded, streams places through `Shell::browse_network`, and does not use the listing cache. A connectable share then lists through the same navigation. A timeout is not retried automatically.
+Cache hit is an explicit early exit (paint from cache, revalidate in background). Cache miss goes to that volume's worker, streams first batch for first paint, then fills. `list_shell` is that path. Its tree lists a folder's direct child directories only after that node expands. Tree selection, the address bar, Back, and Forward open a directory the same way. A busy volume leaves the current list in place and retries from the timer. The Network node is a separate browse: it stays collapsed until expanded, streams places through `Shell::browse_network`, and does not use the listing cache. A connectable share then lists through the same navigation. A timeout is not retried automatically. Size and Date modified are painted with DirectWrite for the cells the list view asks to draw. The Name column stays with the control. A failed DirectWrite factory leaves those cells to the list view's own text. There are no thumbnails yet.
 
 ---
 
@@ -176,7 +176,7 @@ Implementation mapping: the HTML demo uses a `--sp` scale variable, Web Animatio
 
 - Design package is in this repository (`AatozInnoInc/FFE-Fast-File-Explorer`) as of 2026-10-19. It was drafted in Perplexity sessions on 2026-08-31 and 2026-09-22. Files: `README.md`, `CONTRIBUTING.md`, `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`, `docs/HANDOFF.md`, `docs/charts/context-map.md`, `docs/charts/navigation-flow.md`, `docs/theme-motion-spec.md`.
 - Enumeration crate: `fx-core/`. Windows directory reads use `FindFirstFileExW`. Portable tests use a scripted source. SSD budget numbers are not measured yet. Run `fx-core/examples/measure_listing.rs` on a Windows SSD when a real directory is available.
-- List window: `fx-core/src/bin/list_shell.rs`. A virtual `SysListView32`, a `SysTreeView32` of child folders filled on expand, a one-line address bar, Back/Forward, and a collapsed Network node. Calls `fx_core::shell` only. Windows only. Choosing a folder or a connectable share lists it. Small icons are cached by extension. The Network node is not browsed until it expands.
+- List window: `fx-core/src/bin/list_shell.rs`. A virtual `SysListView32`, a `SysTreeView32` of child folders filled on expand, a one-line address bar, Back/Forward, and a collapsed Network node. Calls `fx_core::shell` only. Windows only. Choosing a folder or a connectable share lists it. Small icons are cached by extension. Columns are Name, Size, and Date modified. Size and Date modified are DirectWrite; Name stays native so the icon remains. The Network node is not browsed until it expands.
 - Interactive HTML preview: Halo (8 palettes, Copper default), Lozenge, Deck, Strata, Vellum, with all 29 animations, a demo dock, reduced-motion toggle, and 0.25×–3× speed slider. `theme-reference.html` is still absent from the repository. The written spec is `docs/theme-motion-spec.md`.
 - Workflow templates: `AatozInnoInc/principal-engineer-skills/skills/autonomous-agentic-design-workflow/`.
 
@@ -253,12 +253,18 @@ Implementation mapping: the HTML demo uses a `--sp` scale variable, Web Animatio
 
 **Completed prompt.** `list_shell` shows a Network node beside the opened directory. It is collapsed and empty at startup. Expanding it calls `Shell::browse_network` and inserts places as batches arrive. A container expands through another browse. A connectable share with a UNC lists that path through the existing navigation. The browse uses the existing 2 second timeout. Timeout, cancel, and failure keep the places already shown and are not retried. Results are not stored in the listing cache. The UI thread does not call WNet and does not enumerate. A busy parent refuses the expand. Replacing the folder-tree root leaves a new collapsed Network node and does not browse it. No thumbnails, context menu, IPC, or C ABI. Questions 1–6 stay open. Directory-listing eviction and the SSD budgets were not invented.
 
+### 2026-10-23T14:12:22Z — Owner-draw Size and Date modified
+
+**Signed off by:** Grok 4.7, implementation pass.
+
+**Completed prompt.** The virtual list has Name, Size, and Date modified. `LVN_GETDISPINFO` still supplies the text for every column the control asks for. Name stays a native column so the extension icon remains. Size and Date modified are DirectWrite cells during `NM_CUSTOMDRAW`, and only for the rows the list view paints. A directory's size is blank. Date modified is UTC `YYYY-MM-DD HH:MM`. If the DirectWrite factory cannot be created, or a cell draw fails, that cell falls back to the list view's own text. The UI thread does not enumerate, and a slow volume still does not stall the window. No thumbnails, context menu, IPC, or C ABI. Questions 1–6 stay open. Directory-listing eviction and the SSD budgets were not invented. The window was not launched from this environment.
+
 ---
 
 ## 11. Prompt for Next Agent
 
-> `list_shell` lists a chosen directory through `fx_core::shell`, paints a small icon from an extension cache, and browses the Network node only after the user expands it. Do not add IPC or a C ABI. Do not bypass `shell` with `ListingCache` or `enumerate`.
+> `list_shell` lists a chosen directory through `fx_core::shell`. Name stays a native column with the extension icon. Size and Date modified are DirectWrite owner-draw for the rows the list view paints. A failed DirectWrite factory leaves those cells to the list view. The Network node is browsed only after the user expands it. Do not add IPC or a C ABI. Do not bypass `shell` with `ListingCache` or `enumerate`.
 >
-> Add the Direct2D/DirectWrite owner-draw layer for custom columns on the virtual list. Keep the existing `SysListView32` owner-data notifications as the source of row data. Do not generate thumbnails. The UI thread still never enumerates, and a slow volume still must not stall the window.
+> Add async thumbnail generation on a background worker pool capped at `min(4, logical cores)`. Generate thumbnails for visible rows only. The UI thread never decodes an image and never enumerates. Cancel a thumbnail when the user navigates away from that file. The thumbnail cache stays unbounded; eviction is `TODO — define`. A slow volume still must not stall the window.
 >
 > Do not build a context menu. Do not decide questions 1–6. Do not invent an eviction size. SSD budgets are still unmeasured; do not invent those numbers. Reduced motion and the theme system are out of this slice.

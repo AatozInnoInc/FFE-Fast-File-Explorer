@@ -4,7 +4,9 @@
 //! That call does not wait, and this thread does not read a directory. Choosing
 //! a folder, typing a path, or going back lists that directory. A cache hit sets
 //! the owner-data count and paints before the next `poll`. A row's icon comes
-//! from one cached image per extension, or one shared directory icon. A Network
+//! from one cached image per extension, or one shared directory icon. Size and
+//! Date modified are DirectWrite cells for the rows the list view asks to paint.
+//! The Name column stays with the list view so the icon remains. A Network
 //! node stays collapsed until the user expands it.
 
 use std::mem;
@@ -20,18 +22,20 @@ use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATT
 use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{
-    ImageList_Create, ImageList_ReplaceIcon, InitCommonControlsEx, HIMAGELIST, HTREEITEM,
-    ICC_LISTVIEW_CLASSES, ICC_TREEVIEW_CLASSES, ILC_COLOR32, ILC_MASK, INITCOMMONCONTROLSEX,
-    I_IMAGENONE, LVCFMT_LEFT, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT,
+    ImageList_Create, ImageList_ReplaceIcon, InitCommonControlsEx, CDDS_ITEMPREPAINT,
+    CDDS_PREPAINT, CDDS_SUBITEM, CDRF_DODEFAULT, CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYSUBITEMDRAW,
+    CDRF_SKIPDEFAULT, HIMAGELIST, HTREEITEM, ICC_LISTVIEW_CLASSES, ICC_TREEVIEW_CLASSES,
+    ILC_COLOR32, ILC_MASK, INITCOMMONCONTROLSEX, I_IMAGENONE, LVCFMT_LEFT, LVCF_FMT, LVCF_TEXT,
+    LVCF_WIDTH, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT, LVIS_SELECTED, LVM_GETITEMSTATE,
     LVM_INSERTCOLUMNW, LVM_REDRAWITEMS, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE,
     LVM_SETIMAGELIST, LVM_SETITEMCOUNT, LVN_GETDISPINFOW, LVN_ITEMACTIVATE, LVSICF_NOSCROLL,
     LVSIL_SMALL, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_OWNERDATA,
-    LVS_REPORT, LVS_SHOWSELALWAYS, NMHDR, NMLISTVIEW, NMLVDISPINFOW, NMTREEVIEWW, TVE_COLLAPSE,
-    TVE_EXPAND, TVGN_CARET, TVIF_CHILDREN, TVIF_HANDLE, TVIF_PARAM, TVIF_TEXT, TVINSERTSTRUCTW,
-    TVINSERTSTRUCTW_0, TVITEMW, TVI_LAST, TVI_ROOT, TVM_DELETEITEM, TVM_INSERTITEMW,
-    TVM_SELECTITEM, TVM_SETITEMW, TVN_ITEMEXPANDINGW, TVN_SELCHANGEDW, TVS_DISABLEDRAGDROP,
-    TVS_HASBUTTONS, TVS_HASLINES, TVS_LINESATROOT, TVS_SHOWSELALWAYS, WC_BUTTONW, WC_EDITW,
-    WC_LISTVIEWW, WC_TREEVIEWW,
+    LVS_REPORT, LVS_SHOWSELALWAYS, NMHDR, NMLISTVIEW, NMLVCUSTOMDRAW, NMLVDISPINFOW, NMTREEVIEWW,
+    NM_CUSTOMDRAW, TVE_COLLAPSE, TVE_EXPAND, TVGN_CARET, TVIF_CHILDREN, TVIF_HANDLE, TVIF_PARAM,
+    TVIF_TEXT, TVINSERTSTRUCTW, TVINSERTSTRUCTW_0, TVITEMW, TVI_LAST, TVI_ROOT, TVM_DELETEITEM,
+    TVM_INSERTITEMW, TVM_SELECTITEM, TVM_SETITEMW, TVN_ITEMEXPANDINGW, TVN_SELCHANGEDW,
+    TVS_DISABLEDRAGDROP, TVS_HASBUTTONS, TVS_HASLINES, TVS_LINESATROOT, TVS_SHOWSELALWAYS,
+    WC_BUTTONW, WC_EDITW, WC_LISTVIEWW, WC_TREEVIEWW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, SetFocus, VK_LEFT, VK_RETURN, VK_RIGHT,
@@ -53,6 +57,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use fx_core::{EnumError, NetworkBrowse, NetworkPlace, OpenedDirectory, Path, Shell, VolumeId};
 
+use crate::columns;
+use crate::draw::{self, CellRect};
 use crate::icons::{icon_key, IconCache, IconKey};
 use crate::nav::{normalize_address, same_directory, tree_root, History, TreeRoot};
 use crate::places::{PlaceChange, PlaceList};
@@ -295,7 +301,7 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
             extended as LPARAM,
         );
     }
-    insert_name_column(list);
+    insert_columns(list);
     let images = create_image_list(list);
 
     let tree = create_control(
@@ -446,28 +452,35 @@ fn address_style() -> WINDOW_STYLE {
     WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL as WINDOW_STYLE
 }
 
-fn insert_name_column(list: HWND) {
-    let mut name = wide("Name");
-    let column = LVCOLUMNW {
-        mask: LVCF_TEXT | LVCF_WIDTH | LVCF_FMT,
-        fmt: LVCFMT_LEFT,
-        cx: 240,
-        pszText: name.as_mut_ptr(),
-        cchTextMax: 0,
-        iSubItem: 0,
-        iImage: 0,
-        iOrder: 0,
-        cxMin: 0,
-        cxDefault: 0,
-        cxIdeal: 0,
-    };
-    unsafe {
-        SendMessageW(
-            list,
-            LVM_INSERTCOLUMNW,
-            0,
-            &column as *const LVCOLUMNW as LPARAM,
-        );
+fn insert_columns(list: HWND) {
+    for index in 0..columns::COUNT {
+        let mut title = wide(columns::title(index));
+        let width = match index {
+            columns::SIZE => columns::SIZE_WIDTH,
+            columns::MODIFIED => columns::MODIFIED_WIDTH,
+            _ => 240,
+        };
+        let column = LVCOLUMNW {
+            mask: LVCF_TEXT | LVCF_WIDTH | LVCF_FMT,
+            fmt: LVCFMT_LEFT,
+            cx: width,
+            pszText: title.as_mut_ptr(),
+            cchTextMax: 0,
+            iSubItem: index,
+            iImage: 0,
+            iOrder: 0,
+            cxMin: 0,
+            cxDefault: 0,
+            cxIdeal: 0,
+        };
+        unsafe {
+            SendMessageW(
+                list,
+                LVM_INSERTCOLUMNW,
+                index as WPARAM,
+                &column as *const LVCOLUMNW as LPARAM,
+            );
+        }
     }
 }
 
@@ -942,6 +955,7 @@ fn on_notify(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     }
     let code = unsafe { (*(lparam as *const NMHDR)).code };
     match code {
+        NM_CUSTOMDRAW => on_custom_draw(hwnd, lparam),
         LVN_GETDISPINFOW => {
             on_list_dispinfo(hwnd, lparam);
             0
@@ -959,11 +973,12 @@ fn on_notify(hwnd: HWND, lparam: LPARAM) -> LRESULT {
 fn on_list_dispinfo(hwnd: HWND, lparam: LPARAM) {
     let info = unsafe { &mut *(lparam as *mut NMLVDISPINFOW) };
     let item = &mut info.item;
-    if item.iSubItem != 0 || item.iItem < 0 {
+    if item.iItem < 0 || !(columns::NAME..=columns::MODIFIED).contains(&item.iSubItem) {
         return;
     }
+    let subitem = item.iSubItem;
     let wants_text = item.mask & LVIF_TEXT != 0;
-    let wants_image = item.mask & LVIF_IMAGE != 0;
+    let wants_image = subitem == columns::NAME && (item.mask & LVIF_IMAGE) != 0;
     if !wants_text && !wants_image {
         return;
     }
@@ -971,23 +986,97 @@ fn on_list_dispinfo(hwnd: HWND, lparam: LPARAM) {
     let buffer = item.pszText;
     let capacity = item.cchTextMax;
     let row = state_mut(hwnd).and_then(|state| {
-        state
-            .rows
-            .shown()
-            .get(index)
-            .map(|entry| (entry.name.clone(), entry.is_directory))
+        state.rows.shown().get(index).map(|entry| {
+            let label = if wants_text {
+                columns::text(subitem, entry)
+            } else {
+                String::new()
+            };
+            let icon = if wants_image {
+                Some((entry.name.clone(), entry.is_directory))
+            } else {
+                None
+            };
+            (label, icon)
+        })
     });
     if wants_text {
         match &row {
-            Some((name, _)) => write_name(buffer, capacity, name),
+            Some((label, _)) => write_name(buffer, capacity, label),
             None => write_name(buffer, capacity, ""),
         }
     }
     if wants_image {
         item.iImage = match &row {
-            Some((name, is_directory)) => cached_icon(hwnd, name, *is_directory),
-            None => I_IMAGENONE,
+            Some((_, Some((name, is_directory)))) => cached_icon(hwnd, name, *is_directory),
+            _ => I_IMAGENONE,
         };
+    }
+}
+
+/// Size and Date modified for rows the list view is painting. Subitem 0 stays
+/// with the control so the extension icon is still drawn. The tree's custom
+/// draw is ignored. The label is copied before DirectWrite runs.
+fn on_custom_draw(hwnd: HWND, lparam: LPARAM) -> LRESULT {
+    let draw = unsafe { &*(lparam as *const NMLVCUSTOMDRAW) };
+    let Some(list) = list_handle(hwnd) else {
+        return CDRF_DODEFAULT as LRESULT;
+    };
+    if draw.nmcd.hdr.hwndFrom != list {
+        return CDRF_DODEFAULT as LRESULT;
+    }
+    match draw.nmcd.dwDrawStage {
+        CDDS_PREPAINT => CDRF_NOTIFYITEMDRAW as LRESULT,
+        CDDS_ITEMPREPAINT => CDRF_NOTIFYSUBITEMDRAW as LRESULT,
+        stage if stage == (CDDS_ITEMPREPAINT | CDDS_SUBITEM) => paint_subitem(hwnd, list, draw),
+        _ => CDRF_DODEFAULT as LRESULT,
+    }
+}
+
+fn paint_subitem(hwnd: HWND, list: HWND, draw: &NMLVCUSTOMDRAW) -> LRESULT {
+    let subitem = draw.iSubItem;
+    if subitem != columns::SIZE && subitem != columns::MODIFIED {
+        return CDRF_DODEFAULT as LRESULT;
+    }
+    let row = draw.nmcd.dwItemSpec;
+    let text = state_mut(hwnd).and_then(|state| {
+        state
+            .rows
+            .shown()
+            .get(row)
+            .map(|entry| columns::text(subitem, entry))
+    });
+    let Some(text) = text.filter(|text| !text.is_empty()) else {
+        return CDRF_DODEFAULT as LRESULT;
+    };
+    let selected = row_selected(list, row);
+    let bounds = cell_rect(draw.nmcd.rc);
+    let text_bounds = cell_rect(draw.rcText);
+    if draw::paint_text(draw.nmcd.hdc, bounds, text_bounds, &text, selected) {
+        CDRF_SKIPDEFAULT as LRESULT
+    } else {
+        CDRF_DODEFAULT as LRESULT
+    }
+}
+
+fn row_selected(list: HWND, row: usize) -> bool {
+    let state = unsafe {
+        SendMessageW(
+            list,
+            LVM_GETITEMSTATE,
+            row as WPARAM,
+            LVIS_SELECTED as LPARAM,
+        )
+    };
+    state & LVIS_SELECTED as LRESULT != 0
+}
+
+fn cell_rect(rect: RECT) -> CellRect {
+    CellRect {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
     }
 }
 
@@ -1551,7 +1640,26 @@ fn fit_panes(hwnd: HWND) {
         let list_width = (width - tree_width).max(0);
         MoveWindow(tree, 0, top, tree_width, body, 1);
         MoveWindow(list, tree_width, top, list_width, body, 1);
-        SendMessageW(list, LVM_SETCOLUMNWIDTH, 0, list_width as LPARAM);
+        let fixed = columns::SIZE_WIDTH + columns::MODIFIED_WIDTH;
+        let name_width = (list_width - fixed).max(80);
+        SendMessageW(
+            list,
+            LVM_SETCOLUMNWIDTH,
+            columns::NAME as WPARAM,
+            name_width as LPARAM,
+        );
+        SendMessageW(
+            list,
+            LVM_SETCOLUMNWIDTH,
+            columns::SIZE as WPARAM,
+            columns::SIZE_WIDTH as LPARAM,
+        );
+        SendMessageW(
+            list,
+            LVM_SETCOLUMNWIDTH,
+            columns::MODIFIED as WPARAM,
+            columns::MODIFIED_WIDTH as LPARAM,
+        );
     }
 }
 
