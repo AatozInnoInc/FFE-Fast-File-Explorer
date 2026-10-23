@@ -98,6 +98,8 @@ struct Item<'a> {
 }
 
 fn push_item(buf: &mut Vec<u8>, item: Item<'_>) {
+    #[allow(unknown_lints)]
+    #[allow(clippy::manual_is_multiple_of)]
     while buf.len() % 4 != 0 {
         buf.push(0);
     }

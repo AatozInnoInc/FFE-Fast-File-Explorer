@@ -141,6 +141,8 @@ fn decode_scaled(path: &str) -> Result<Rgba, ()> {
     let len = usize::try_from(stride.checked_mul(height).ok_or(())?).map_err(|_| ())?;
     let mut pixels = vec![0u8; len];
     unsafe { scaler.CopyPixels(std::ptr::null(), stride, &mut pixels) }.map_err(|_| ())?;
+    #[allow(unknown_lints)]
+    #[allow(clippy::chunks_exact_to_as_chunks)]
     for pixel in pixels.chunks_exact_mut(4) {
         pixel.swap(0, 2);
     }
