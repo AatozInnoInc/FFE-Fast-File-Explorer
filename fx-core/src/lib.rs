@@ -6,6 +6,7 @@
 
 mod cache;
 mod cancel;
+pub mod dump;
 mod enumerate;
 pub mod helper;
 mod kernel;
