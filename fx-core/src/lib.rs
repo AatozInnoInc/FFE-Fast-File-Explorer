@@ -7,11 +7,13 @@
 mod cache;
 mod cancel;
 mod enumerate;
+pub mod helper;
 mod kernel;
 mod network;
 mod shell;
 mod source;
 pub mod thumbs;
+pub mod watchdog;
 
 #[cfg(windows)]
 mod windows;
