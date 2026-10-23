@@ -8,7 +8,7 @@ Windows 11 File Explorer is slow to render even on a fresh install because of la
 
 ## Status
 
-`fx-core` enumerates directories with one worker per volume, caches a finished listing, and exposes `shell` (open, poll, cancel, and a network browse that does not use that cache). `list_shell` is a Win32 `SysListView32` in virtual mode, with a `SysTreeView32` of child folders, a one-line address bar, Back/Forward, and a collapsed Network node. Expanding a folder lists its children through `shell`. Choosing a folder, entering a path, going back, or choosing a connectable share lists that directory. Painted rows show a small icon cached by extension. Size and Date modified are DirectWrite columns; Name stays native. There is no context menu yet. See `docs/ROADMAP.md`.
+`fx-core` enumerates directories with one worker per volume, caches a finished listing, and exposes `shell` (open, poll, cancel, and a network browse that does not use that cache). `list_shell` is a Win32 `SysListView32` in virtual mode, with a `SysTreeView32` of child folders, a one-line address bar, Back/Forward, and a collapsed Network node. Expanding a folder lists its children through `shell`. Choosing a folder, entering a path, going back, or choosing a connectable share lists that directory. Painted rows show a small icon cached by extension. Size and Date modified are DirectWrite columns; Name stays native. Visible image rows request thumbnails on a background pool. There is no context menu yet. See `docs/ROADMAP.md`.
 
 ## Getting started
 
@@ -24,7 +24,7 @@ On Windows, open one directory in the list window:
 cargo run --bin list_shell -- C:\some\directory
 ```
 
-A cache hit paints stored names before the live listing finishes. The tree starts collapsed. Expand a folder to list its child directories. The first expand of the open directory waits until the list's listing of that same volume finishes, then paints from the cache. Choose a tree folder, double-click a directory in the list, or press Enter in the address bar to list that path. Back and Forward (and Alt+Left / Alt+Right) revisit directories this window already opened. If that volume is busy, the current list stays and the window retries without freezing. Icons are looked up once per extension, not once per file. Size and Date modified are drawn for the visible rows; a directory's size is blank, and the date is UTC. The Network node stays empty until you expand it. A connectable share then lists like any other path. A network timeout is not retried on its own.
+A cache hit paints stored names before the live listing finishes. The tree starts collapsed. Expand a folder to list its child directories. The first expand of the open directory waits until the list's listing of that same volume finishes, then paints from the cache. Choose a tree folder, double-click a directory in the list, or press Enter in the address bar to list that path. Back and Forward (and Alt+Left / Alt+Right) revisit directories this window already opened. If that volume is busy, the current list stays and the window retries without freezing. Icons are looked up once per extension, not once per file. Size and Date modified are drawn for the visible rows; a directory's size is blank, and the date is UTC. Image thumbnails are decoded off the UI thread and drawn over the icon when ready. Leaving the folder cancels those requests. The Network node stays empty until you expand it. A connectable share then lists like any other path. A network timeout is not retried on its own.
 
 On Windows, measure a real directory with:
 

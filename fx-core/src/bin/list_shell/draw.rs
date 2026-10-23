@@ -8,13 +8,14 @@ use std::cell::RefCell;
 
 use windows::core::w;
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F,
+    D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_STRAIGHT, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F,
+    D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory, D2D1_DRAW_TEXT_OPTIONS_CLIP,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_RENDER_TARGET_PROPERTIES,
-    D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
-    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
+    D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+    D2D1_BITMAP_PROPERTIES, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_FEATURE_LEVEL_DEFAULT, D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT,
+    D2D1_RENDER_TARGET_USAGE_NONE, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteTextFormat,
@@ -22,7 +23,9 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
+};
 use windows::Win32::Graphics::Gdi::HDC;
 use windows_sys::Win32::Graphics::Gdi::{
     GetSysColor, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT,
@@ -59,6 +62,26 @@ thread_local! {
     static PAINTER: RefCell<Slot> = const { RefCell::new(Slot::Untried) };
 }
 
+/// Draws an RGBA8 thumbnail into `bounds`. False leaves the list view's icon.
+pub fn paint_bitmap(
+    hdc: *mut core::ffi::c_void,
+    bounds: CellRect,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+) -> bool {
+    let Some(expected) = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|count| count.checked_mul(4))
+    else {
+        return false;
+    };
+    if hdc.is_null() || pixels.len() != expected || !positive(bounds) {
+        return false;
+    }
+    with_painter(|painter| painter.paint_bitmap(hdc, bounds, width, height, pixels))
+}
+
 /// Fills `bounds` and draws `text` with DirectWrite. False means the list view
 /// should paint the string itself.
 pub fn paint_text(
@@ -71,38 +94,31 @@ pub fn paint_text(
     if hdc.is_null() || text.is_empty() || !positive(bounds) {
         return false;
     }
-    PAINTER.with(|slot| {
-        let current = slot.replace(Slot::Busy);
-        match current {
-            Slot::Busy => false,
-            Slot::Failed => {
-                *slot.borrow_mut() = Slot::Failed;
-                false
-            }
-            Slot::Untried => match Painter::create() {
-                Ok(painter) => finish(slot, painter, hdc, bounds, text_bounds, text, selected),
-                Err(()) => {
-                    *slot.borrow_mut() = Slot::Failed;
-                    false
-                }
-            },
-            Slot::Ready(painter) => finish(slot, painter, hdc, bounds, text_bounds, text, selected),
-        }
-    })
+    with_painter(|painter| painter.paint(hdc, bounds, text_bounds, text, selected))
 }
 
-fn finish(
-    slot: &RefCell<Slot>,
-    mut painter: Painter,
-    hdc: *mut core::ffi::c_void,
-    bounds: CellRect,
-    text_bounds: CellRect,
-    text: &str,
-    selected: bool,
-) -> bool {
-    let ok = painter.paint(hdc, bounds, text_bounds, text, selected);
-    *slot.borrow_mut() = Slot::Ready(painter);
-    ok
+fn with_painter(draw: impl FnOnce(&mut Painter) -> bool) -> bool {
+    PAINTER.with(|slot| {
+        let current = slot.replace(Slot::Busy);
+        let mut painter = match current {
+            Slot::Busy => return false,
+            Slot::Failed => {
+                *slot.borrow_mut() = Slot::Failed;
+                return false;
+            }
+            Slot::Untried => match Painter::create() {
+                Ok(painter) => painter,
+                Err(()) => {
+                    *slot.borrow_mut() = Slot::Failed;
+                    return false;
+                }
+            },
+            Slot::Ready(painter) => painter,
+        };
+        let ok = draw(&mut painter);
+        *slot.borrow_mut() = Slot::Ready(painter);
+        ok
+    })
 }
 
 impl Painter {
@@ -130,13 +146,38 @@ impl Painter {
         text: &str,
         selected: bool,
     ) -> bool {
+        let text_bounds = text_area(bounds, text_bounds);
+        let format = self.format.clone();
+        self.session(hdc, bounds, |target| {
+            draw_cell(target, &format, bounds, text_bounds, text, selected)
+        })
+    }
+
+    fn paint_bitmap(
+        &mut self,
+        hdc: *mut core::ffi::c_void,
+        bounds: CellRect,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) -> bool {
+        self.session(hdc, bounds, |target| {
+            draw_bitmap(target, bounds, width, height, pixels)
+        })
+    }
+
+    fn session(
+        &mut self,
+        hdc: *mut core::ffi::c_void,
+        bounds: CellRect,
+        draw: impl FnOnce(&ID2D1DCRenderTarget) -> bool,
+    ) -> bool {
         if self.ensure_target().is_err() {
             return false;
         }
         let Some(target) = self.target.clone() else {
             return false;
         };
-        let text_bounds = text_area(bounds, text_bounds);
         let bound = windows::Win32::Foundation::RECT {
             left: bounds.left,
             top: bounds.top,
@@ -147,7 +188,7 @@ impl Painter {
             return false;
         }
         unsafe { target.BeginDraw() };
-        let drew = draw_cell(&target, &self.format, bounds, text_bounds, text, selected);
+        let drew = draw(&target);
         match unsafe { target.EndDraw(None, None) } {
             Ok(()) => drew,
             Err(err) if err.code().0 == RECREATE_TARGET => {
@@ -215,6 +256,44 @@ fn draw_cell(
                 DWRITE_MEASURING_MODE_NATURAL,
             );
         }
+    }
+    true
+}
+
+fn draw_bitmap(
+    target: &ID2D1DCRenderTarget,
+    bounds: CellRect,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+) -> bool {
+    let properties = D2D1_BITMAP_PROPERTIES {
+        pixelFormat: D2D1_PIXEL_FORMAT {
+            format: DXGI_FORMAT_R8G8B8A8_UNORM,
+            alphaMode: D2D1_ALPHA_MODE_STRAIGHT,
+        },
+        dpiX: 96.0,
+        dpiY: 96.0,
+    };
+    let Ok(bitmap) = (unsafe {
+        target.CreateBitmap(
+            D2D_SIZE_U { width, height },
+            Some(pixels.as_ptr().cast()),
+            width.saturating_mul(4),
+            &properties,
+        )
+    }) else {
+        return false;
+    };
+    let dest = d2_rect(bounds);
+    unsafe {
+        target.DrawBitmap(
+            &bitmap,
+            Some(&dest),
+            1.0,
+            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+            None,
+        );
     }
     true
 }
