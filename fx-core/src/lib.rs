@@ -11,6 +11,7 @@ mod enumerate;
 pub mod helper;
 mod kernel;
 mod network;
+pub mod settings;
 mod shell;
 mod source;
 pub mod thumbs;

@@ -1,6 +1,10 @@
+use std::time::Duration;
+
 use crate::cache::ListingCache;
 use crate::enumerate::{ListingOptions, TryEvent};
-use crate::kernel::{EnumError, FileEntry, Path, VolumeId};
+use crate::kernel::{EnumError, FileEntry, Path, VolumeId, VolumeKind};
+use crate::settings::TimeoutSetting;
+use crate::DEFAULT_NETWORK_TIMEOUT;
 
 /// In-process door for the Win32 shell.
 ///
@@ -8,6 +12,8 @@ use crate::kernel::{EnumError, FileEntry, Path, VolumeId};
 #[derive(Clone)]
 pub struct Shell {
     cache: ListingCache,
+    /// Used only for [`VolumeKind::Network`]. Local volumes ignore it.
+    network_timeout: Duration,
 }
 
 /// One open directory: cached entries, if any, and the live listing behind [`Shell::poll`].
@@ -27,6 +33,27 @@ impl Shell {
     pub fn new() -> Self {
         Self {
             cache: ListingCache::new(),
+            network_timeout: DEFAULT_NETWORK_TIMEOUT,
+        }
+    }
+
+    /// Stores the network-volume deadline. Local volumes still have none.
+    ///
+    /// This does not enable auto-retry.
+    pub fn set_network_timeout(&mut self, setting: TimeoutSetting) {
+        self.network_timeout = Duration::from_millis(setting.millis);
+    }
+
+    /// Stored network-volume deadline. Local listings do not use it.
+    pub fn network_timeout(&self) -> Duration {
+        self.network_timeout
+    }
+
+    /// Deadline passed to a network volume. `None` for a local volume.
+    pub fn network_timeout_for(&self, volume: &VolumeId) -> Option<Duration> {
+        match volume.kind() {
+            VolumeKind::Network => Some(self.network_timeout),
+            VolumeKind::Local => None,
         }
     }
 
@@ -35,11 +62,12 @@ impl Shell {
     /// When the cache holds this directory, `cached` is those entries and the call returns
     /// without waiting for disk. A live listing still starts on that volume's worker.
     pub fn open(&self, volume: VolumeId, directory: Path) -> Result<OpenedDirectory, EnumError> {
+        let network_timeout = self.network_timeout_for(&volume);
         self.open_with(ListingOptions {
             volume,
             directory,
             batch_size: 0,
-            network_timeout: None,
+            network_timeout,
         })
     }
 
@@ -264,5 +292,21 @@ mod tests {
             Shell::browse_network(Some(r"\\server\share")),
             Err(EnumError::WindowsOnly)
         ));
+    }
+
+    #[test]
+    fn network_volume_uses_the_stored_timeout_and_local_does_not() {
+        let mut shell = Shell::new();
+        assert_eq!(shell.network_timeout_for(&VolumeId::local("C:")), None);
+        assert_eq!(
+            shell.network_timeout_for(&VolumeId::network(r"\\server\share")),
+            Some(crate::DEFAULT_NETWORK_TIMEOUT)
+        );
+        shell.set_network_timeout(TimeoutSetting { millis: 1_500 });
+        assert_eq!(
+            shell.network_timeout_for(&VolumeId::network(r"\\server\share")),
+            Some(Duration::from_millis(1_500))
+        );
+        assert_eq!(shell.network_timeout_for(&VolumeId::local("C:")), None);
     }
 }

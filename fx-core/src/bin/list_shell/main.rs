@@ -15,6 +15,7 @@ mod images;
 mod nav;
 mod places;
 mod rows;
+mod timeout;
 mod tree;
 
 #[cfg(windows)]
