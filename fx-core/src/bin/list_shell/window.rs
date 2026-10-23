@@ -6,9 +6,12 @@
 //! the owner-data count and paints before the next `poll`. A row's icon comes
 //! from one cached image per extension, or one shared directory icon. Size and
 //! Date modified are DirectWrite cells for the rows the list view asks to paint.
-//! The Name column stays with the list view so the icon remains. A Network
+//! The Name column stays with the list view so the icon remains. An image in a
+//! visible row requests a thumbnail on the background pool, and that buffer
+//! covers the icon once it is ready. A Network
 //! node stays collapsed until the user expands it.
 
+use std::collections::HashMap;
 use std::mem;
 use std::process::ExitCode;
 use std::ptr;
@@ -22,20 +25,22 @@ use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATT
 use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{
-    ImageList_Create, ImageList_ReplaceIcon, InitCommonControlsEx, CDDS_ITEMPREPAINT,
-    CDDS_PREPAINT, CDDS_SUBITEM, CDRF_DODEFAULT, CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYSUBITEMDRAW,
-    CDRF_SKIPDEFAULT, HIMAGELIST, HTREEITEM, ICC_LISTVIEW_CLASSES, ICC_TREEVIEW_CLASSES,
-    ILC_COLOR32, ILC_MASK, INITCOMMONCONTROLSEX, I_IMAGENONE, LVCFMT_LEFT, LVCF_FMT, LVCF_TEXT,
-    LVCF_WIDTH, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT, LVIS_SELECTED, LVM_GETITEMSTATE,
-    LVM_INSERTCOLUMNW, LVM_REDRAWITEMS, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE,
-    LVM_SETIMAGELIST, LVM_SETITEMCOUNT, LVN_GETDISPINFOW, LVN_ITEMACTIVATE, LVSICF_NOSCROLL,
-    LVSIL_SMALL, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_OWNERDATA,
-    LVS_REPORT, LVS_SHOWSELALWAYS, NMHDR, NMLISTVIEW, NMLVCUSTOMDRAW, NMLVDISPINFOW, NMTREEVIEWW,
-    NM_CUSTOMDRAW, TVE_COLLAPSE, TVE_EXPAND, TVGN_CARET, TVIF_CHILDREN, TVIF_HANDLE, TVIF_PARAM,
-    TVIF_TEXT, TVINSERTSTRUCTW, TVINSERTSTRUCTW_0, TVITEMW, TVI_LAST, TVI_ROOT, TVM_DELETEITEM,
-    TVM_INSERTITEMW, TVM_SELECTITEM, TVM_SETITEMW, TVN_ITEMEXPANDINGW, TVN_SELCHANGEDW,
-    TVS_DISABLEDRAGDROP, TVS_HASBUTTONS, TVS_HASLINES, TVS_LINESATROOT, TVS_SHOWSELALWAYS,
-    WC_BUTTONW, WC_EDITW, WC_LISTVIEWW, WC_TREEVIEWW,
+    ImageList_Create, ImageList_ReplaceIcon, InitCommonControlsEx, CDDS_ITEMPOSTPAINT,
+    CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDDS_SUBITEM, CDRF_DODEFAULT, CDRF_NOTIFYITEMDRAW,
+    CDRF_NOTIFYPOSTPAINT, CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, HIMAGELIST, HTREEITEM,
+    ICC_LISTVIEW_CLASSES, ICC_TREEVIEW_CLASSES, ILC_COLOR32, ILC_MASK, INITCOMMONCONTROLSEX,
+    I_IMAGENONE, LVCFMT_LEFT, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT,
+    LVIR_ICON, LVIS_SELECTED, LVM_GETCOUNTPERPAGE, LVM_GETITEMSTATE, LVM_GETSUBITEMRECT,
+    LVM_GETTOPINDEX, LVM_INSERTCOLUMNW, LVM_REDRAWITEMS, LVM_SETCOLUMNWIDTH,
+    LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMCOUNT, LVN_GETDISPINFOW,
+    LVN_ITEMACTIVATE, LVSICF_NOSCROLL, LVSIL_SMALL, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
+    LVS_NOSORTHEADER, LVS_OWNERDATA, LVS_REPORT, LVS_SHOWSELALWAYS, NMHDR, NMLISTVIEW,
+    NMLVCUSTOMDRAW, NMLVDISPINFOW, NMTREEVIEWW, NM_CUSTOMDRAW, TVE_COLLAPSE, TVE_EXPAND,
+    TVGN_CARET, TVIF_CHILDREN, TVIF_HANDLE, TVIF_PARAM, TVIF_TEXT, TVINSERTSTRUCTW,
+    TVINSERTSTRUCTW_0, TVITEMW, TVI_LAST, TVI_ROOT, TVM_DELETEITEM, TVM_INSERTITEMW,
+    TVM_SELECTITEM, TVM_SETITEMW, TVN_ITEMEXPANDINGW, TVN_SELCHANGEDW, TVS_DISABLEDRAGDROP,
+    TVS_HASBUTTONS, TVS_HASLINES, TVS_LINESATROOT, TVS_SHOWSELALWAYS, WC_BUTTONW, WC_EDITW,
+    WC_LISTVIEWW, WC_TREEVIEWW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, SetFocus, VK_LEFT, VK_RETURN, VK_RIGHT,
@@ -55,11 +60,13 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
 
+use fx_core::thumbs::{ThumbCache, ThumbTicket, TryThumb};
 use fx_core::{EnumError, NetworkBrowse, NetworkPlace, OpenedDirectory, Path, Shell, VolumeId};
 
 use crate::columns;
 use crate::draw::{self, CellRect};
 use crate::icons::{icon_key, IconCache, IconKey};
+use crate::images;
 use crate::nav::{normalize_address, same_directory, tree_root, History, TreeRoot};
 use crate::places::{PlaceChange, PlaceList};
 use crate::rows::{DirectoryRows, RowChange};
@@ -108,6 +115,15 @@ struct ListWindow {
     nodes: Vec<FolderNode>,
     /// The timer is running. This is not "the list is still reading".
     polling: bool,
+    /// RGBA thumbnails. The cache is unbounded. Eviction: TODO — define.
+    thumbs: ThumbCache,
+    /// Tickets for the directory on screen. Navigation cancels these.
+    thumb_jobs: HashMap<String, ThumbJob>,
+}
+
+struct ThumbJob {
+    ticket: ThumbTicket,
+    settled: bool,
 }
 
 struct FolderNode {
@@ -361,6 +377,8 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
         images,
         nodes: Vec::new(),
         polling,
+        thumbs: ThumbCache::with_decoder(images::decode_image),
+        thumb_jobs: HashMap::new(),
     });
     let shown = state.rows.shown().len();
     unsafe {
@@ -680,6 +698,7 @@ fn present_directory(hwnd: HWND, path: &str, mut opened: OpenedDirectory) {
     let needs_poll = !rows.is_settled();
     let Some((list, address)) = (|| {
         let state = state_mut(hwnd)?;
+        cancel_thumbs(state);
         state.rows = rows;
         state.opened = Some(opened);
         state.current = path.to_string();
@@ -813,22 +832,34 @@ fn on_timer(hwnd: HWND) {
     let Some(list) = list_handle(hwnd) else {
         return;
     };
-    let (change, shown, tree_changes, settled_nodes, idle) = {
+    let (change, shown, tree_changes, settled_nodes, idle, thumb_ready) = {
         let Some(state) = state_mut(hwnd) else {
             return;
         };
         let change = drain(state);
         let shown = state.rows.shown().len();
         let (tree_changes, settled_nodes) = drain_tree(state);
+        let thumb_ready = poll_thumbs(state);
         let idle = state.pending.is_none()
             && state.rows.is_settled()
+            && !thumbs_pending(state)
             && state
                 .nodes
                 .iter()
                 .all(|node| node.opened.is_none() && node.browse.is_none());
-        (change, shown, tree_changes, settled_nodes, idle)
+        (
+            change,
+            shown,
+            tree_changes,
+            settled_nodes,
+            idle,
+            thumb_ready,
+        )
     };
     paint(list, change, shown);
+    if thumb_ready {
+        redraw_visible(list);
+    }
     for (index, child_change) in tree_changes {
         match child_change {
             NodeChange::Directories(change) => apply_children(hwnd, index, change),
@@ -1027,14 +1058,21 @@ fn on_custom_draw(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     }
     match draw.nmcd.dwDrawStage {
         CDDS_PREPAINT => CDRF_NOTIFYITEMDRAW as LRESULT,
-        CDDS_ITEMPREPAINT => CDRF_NOTIFYSUBITEMDRAW as LRESULT,
+        CDDS_ITEMPREPAINT => {
+            request_visible_thumb(hwnd, draw.nmcd.dwItemSpec);
+            CDRF_NOTIFYSUBITEMDRAW as LRESULT
+        }
         stage if stage == (CDDS_ITEMPREPAINT | CDDS_SUBITEM) => paint_subitem(hwnd, list, draw),
+        stage if stage == (CDDS_ITEMPOSTPAINT | CDDS_SUBITEM) => overlay_thumb(hwnd, list, draw),
         _ => CDRF_DODEFAULT as LRESULT,
     }
 }
 
 fn paint_subitem(hwnd: HWND, list: HWND, draw: &NMLVCUSTOMDRAW) -> LRESULT {
     let subitem = draw.iSubItem;
+    if subitem == columns::NAME {
+        return CDRF_NOTIFYPOSTPAINT as LRESULT;
+    }
     if subitem != columns::SIZE && subitem != columns::MODIFIED {
         return CDRF_DODEFAULT as LRESULT;
     }
@@ -1077,6 +1115,120 @@ fn cell_rect(rect: RECT) -> CellRect {
         top: rect.top,
         right: rect.right,
         bottom: rect.bottom,
+    }
+}
+
+fn cancel_thumbs(state: &mut ListWindow) {
+    for job in state.thumb_jobs.values() {
+        job.ticket.cancel();
+    }
+    state.thumb_jobs.clear();
+}
+
+fn thumbs_pending(state: &ListWindow) -> bool {
+    state.thumb_jobs.values().any(|job| !job.settled)
+}
+
+/// `try_recv` never waits. A transition to Ready asks for one redraw.
+fn poll_thumbs(state: &mut ListWindow) -> bool {
+    let mut ready = false;
+    for job in state.thumb_jobs.values_mut() {
+        if job.settled {
+            continue;
+        }
+        match job.ticket.try_recv() {
+            TryThumb::Pending => {}
+            TryThumb::Ready(_) => {
+                job.settled = true;
+                ready = true;
+            }
+            TryThumb::Failed | TryThumb::Cancelled => job.settled = true,
+        }
+    }
+    ready
+}
+
+/// Visible rows only: the list view sends item prepaint for those rows.
+/// `request` does not decode and does not sleep.
+fn request_visible_thumb(hwnd: HWND, row: usize) {
+    let Some(path) = state_mut(hwnd).and_then(|state| thumb_path(state, row)) else {
+        return;
+    };
+    let pending = state_mut(hwnd).is_some_and(|state| {
+        if state.thumb_jobs.contains_key(&path) {
+            return false;
+        }
+        let ticket = state.thumbs.request(&path);
+        let settled = !matches!(ticket.try_recv(), TryThumb::Pending);
+        state.thumb_jobs.insert(path, ThumbJob { ticket, settled });
+        !settled
+    });
+    if pending {
+        ensure_timer(hwnd);
+    }
+}
+
+fn thumb_path(state: &ListWindow, row: usize) -> Option<String> {
+    let entry = state.rows.shown().get(row)?;
+    if entry.is_directory || !images::wants_thumbnail(&entry.name) {
+        return None;
+    }
+    Some(child_directory(&state.current, &entry.name))
+}
+
+fn overlay_thumb(hwnd: HWND, list: HWND, draw: &NMLVCUSTOMDRAW) -> LRESULT {
+    if draw.iSubItem != columns::NAME {
+        return CDRF_DODEFAULT as LRESULT;
+    }
+    let row = draw.nmcd.dwItemSpec;
+    let rgba = state_mut(hwnd).and_then(|state| {
+        let path = thumb_path(state, row)?;
+        match state.thumb_jobs.get(&path)?.ticket.try_recv() {
+            TryThumb::Ready(rgba) => Some(rgba),
+            _ => None,
+        }
+    });
+    let Some(rgba) = rgba else {
+        return CDRF_DODEFAULT as LRESULT;
+    };
+    let Some(bounds) = icon_rect(list, row) else {
+        return CDRF_DODEFAULT as LRESULT;
+    };
+    let _ = draw::paint_bitmap(draw.nmcd.hdc, bounds, rgba.width, rgba.height, &rgba.pixels);
+    CDRF_DODEFAULT as LRESULT
+}
+
+fn icon_rect(list: HWND, row: usize) -> Option<CellRect> {
+    let mut rect = RECT {
+        left: columns::NAME,
+        top: LVIR_ICON as i32,
+        right: 0,
+        bottom: 0,
+    };
+    let found = unsafe {
+        SendMessageW(
+            list,
+            LVM_GETSUBITEMRECT,
+            row as WPARAM,
+            &mut rect as *mut RECT as LPARAM,
+        )
+    };
+    if found == 0 || rect.right <= rect.left || rect.bottom <= rect.top {
+        None
+    } else {
+        Some(cell_rect(rect))
+    }
+}
+
+fn redraw_visible(list: HWND) {
+    let top = unsafe { SendMessageW(list, LVM_GETTOPINDEX, 0, 0) };
+    let page = unsafe { SendMessageW(list, LVM_GETCOUNTPERPAGE, 0, 0) };
+    if top < 0 || page <= 0 {
+        return;
+    }
+    let last = top.saturating_add(page).saturating_sub(1);
+    unsafe {
+        SendMessageW(list, LVM_REDRAWITEMS, top as WPARAM, last as LPARAM);
     }
 }
 
@@ -1667,7 +1819,8 @@ fn on_destroy(hwnd: HWND) {
     let raw = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut ListWindow;
     if !raw.is_null() {
         unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
-        let state = unsafe { Box::from_raw(raw) };
+        let mut state = unsafe { Box::from_raw(raw) };
+        cancel_thumbs(&mut state);
         if state.polling {
             unsafe { KillTimer(hwnd, TIMER_ID) };
         }
