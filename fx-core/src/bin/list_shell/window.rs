@@ -1,8 +1,9 @@
-//! One top-level window, a folder `SysTreeView32`, and a virtual `SysListView32`.
+//! One top-level window: address bar, folder tree, and a virtual list.
 //!
 //! The message loop is `GetMessageW`. Enumeration is `Shell::poll` on a timer.
-//! That call does not wait, and this thread does not read a directory. The tree
-//! lists a node only after that node expands, and only its direct child folders.
+//! That call does not wait, and this thread does not read a directory. Choosing
+//! a folder, typing a path, or going back lists that directory. A cache hit sets
+//! the owner-data count and paints before the next `poll`.
 
 use std::mem;
 use std::process::ExitCode;
@@ -18,25 +19,31 @@ use windows_sys::Win32::UI::Controls::{
     InitCommonControlsEx, HTREEITEM, ICC_LISTVIEW_CLASSES, ICC_TREEVIEW_CLASSES,
     INITCOMMONCONTROLSEX, LVCFMT_LEFT, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIF_TEXT,
     LVM_INSERTCOLUMNW, LVM_REDRAWITEMS, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE,
-    LVM_SETITEMCOUNT, LVN_GETDISPINFOW, LVSICF_NOSCROLL, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
-    LVS_NOSORTHEADER, LVS_OWNERDATA, LVS_REPORT, LVS_SHOWSELALWAYS, NMHDR, NMLVDISPINFOW,
-    NMTREEVIEWW, TVE_COLLAPSE, TVE_EXPAND, TVIF_CHILDREN, TVIF_HANDLE, TVIF_PARAM, TVIF_TEXT,
-    TVINSERTSTRUCTW, TVINSERTSTRUCTW_0, TVITEMW, TVI_LAST, TVI_ROOT, TVM_DELETEITEM,
-    TVM_INSERTITEMW, TVM_SETITEMW, TVN_ITEMEXPANDINGW, TVS_DISABLEDRAGDROP, TVS_HASBUTTONS,
-    TVS_HASLINES, TVS_LINESATROOT, TVS_SHOWSELALWAYS, WC_LISTVIEWW, WC_TREEVIEWW,
+    LVM_SETITEMCOUNT, LVN_GETDISPINFOW, LVN_ITEMACTIVATE, LVSICF_NOSCROLL, LVS_EX_DOUBLEBUFFER,
+    LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_OWNERDATA, LVS_REPORT, LVS_SHOWSELALWAYS, NMHDR,
+    NMLISTVIEW, NMLVDISPINFOW, NMTREEVIEWW, TVE_COLLAPSE, TVE_EXPAND, TVGN_CARET, TVIF_CHILDREN,
+    TVIF_HANDLE, TVIF_PARAM, TVIF_TEXT, TVINSERTSTRUCTW, TVINSERTSTRUCTW_0, TVITEMW, TVI_LAST,
+    TVI_ROOT, TVM_DELETEITEM, TVM_INSERTITEMW, TVM_SELECTITEM, TVM_SETITEMW, TVN_ITEMEXPANDINGW,
+    TVN_SELCHANGEDW, TVS_DISABLEDRAGDROP, TVS_HASBUTTONS, TVS_HASLINES, TVS_LINESATROOT,
+    TVS_SHOWSELALWAYS, WC_BUTTONW, WC_EDITW, WC_LISTVIEWW, WC_TREEVIEWW,
 };
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    EnableWindow, SetFocus, VK_LEFT, VK_RETURN, VK_RIGHT,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
-    GetWindowLongPtrW, KillTimer, LoadCursorW, MoveWindow, PostQuitMessage, RegisterClassW,
-    SendMessageW, SetTimer, SetWindowLongPtrW, ShowWindow, TranslateMessage, CS_HREDRAW,
-    CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, HMENU, IDC_ARROW, MSG, SIZE_MINIMIZED, SW_SHOW,
-    WINDOW_STYLE, WM_DESTROY, WM_NOTIFY, WM_SIZE, WM_TIMER, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN,
-    WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetAncestor, GetClientRect,
+    GetMessageW, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, KillTimer, LoadCursorW,
+    MoveWindow, PostQuitMessage, RegisterClassW, SendMessageW, SetTimer, SetWindowLongPtrW,
+    SetWindowTextW, ShowWindow, TranslateMessage, BN_CLICKED, BS_PUSHBUTTON, CS_HREDRAW,
+    CS_VREDRAW, CW_USEDEFAULT, ES_AUTOHSCROLL, GA_ROOT, GWLP_USERDATA, HMENU, IDC_ARROW, MSG,
+    SIZE_MINIMIZED, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_DESTROY, WM_KEYDOWN,
+    WM_NOTIFY, WM_SIZE, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN,
+    WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
 
 use fx_core::{EnumError, OpenedDirectory, Path, Shell, VolumeId};
 
+use crate::nav::{normalize_address, same_directory, tree_root, History, TreeRoot};
 use crate::rows::{DirectoryRows, RowChange};
 use crate::tree::{child_directory, ChildChange, Expansion};
 
@@ -45,12 +52,34 @@ const POLL_INTERVAL_MS: u32 = 16;
 const TIMER_ID: usize = 1;
 /// Width of the folder tree beside the list. Not a performance budget.
 const TREE_WIDTH: i32 = 240;
+/// Height of the Back, Forward, and address row. Not a performance budget.
+const NAV_HEIGHT: i32 = 28;
+const NAV_GAP: i32 = 4;
+const BACK_WIDTH: i32 = 72;
+const FORWARD_WIDTH: i32 = 84;
+const ID_LIST: isize = 1;
+const ID_TREE: isize = 2;
+const ID_BACK: isize = 3;
+const ID_FORWARD: isize = 4;
+const ID_ADDRESS: isize = 5;
 const CLASS_NAME: windows_sys::core::PCWSTR = w!("RapidExplorerList");
 
 struct ListWindow {
     shell: Shell,
     list: HWND,
     tree: HWND,
+    back: HWND,
+    forward: HWND,
+    address: HWND,
+    history: History,
+    /// Directory whose rows are on screen. Unchanged until a navigation opens.
+    current: String,
+    /// Path of the tree's root item. Not rewritten when a descendant is listed.
+    tree_root: String,
+    /// A path whose volume worker was busy. The timer retries it. The list stays.
+    pending: Option<PendingNav>,
+    /// `TVM_SELECTITEM` reenters with `TVN_SELCHANGED`. That must not navigate again.
+    suppress_select: bool,
     opened: Option<OpenedDirectory>,
     rows: DirectoryRows,
     nodes: Vec<FolderNode>,
@@ -65,6 +94,20 @@ struct FolderNode {
     expansion: Option<Expansion>,
     opened: Option<OpenedDirectory>,
     removed: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NavKind {
+    /// Record the path after it opens. Same path as the current entry does nothing.
+    Push,
+    Back,
+    Forward,
+}
+
+#[derive(Clone)]
+struct PendingNav {
+    path: String,
+    kind: NavKind,
 }
 
 impl FolderNode {
@@ -181,30 +224,15 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
     };
     let _ = unsafe { InitCommonControlsEx(&controls) };
 
-    let list = unsafe {
-        CreateWindowExW(
-            0,
-            WC_LISTVIEWW,
-            ptr::null(),
-            list_style(),
-            0,
-            0,
-            0,
-            0,
-            hwnd,
-            1 as HMENU,
-            instance(),
-            ptr::null(),
-        )
-    };
-    if list.is_null() {
-        eprintln!(
-            "list_shell could not create the list view: {}",
-            last_error()
-        );
-        return Err(1);
-    }
-
+    let list = create_control(
+        hwnd,
+        WC_LISTVIEWW,
+        "",
+        list_style(),
+        0,
+        ID_LIST,
+        "list view",
+    )?;
     let extended = LVS_EX_DOUBLEBUFFER | LVS_EX_FULLROWSELECT;
     unsafe {
         SendMessageW(
@@ -216,29 +244,42 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
     }
     insert_name_column(list);
 
-    let tree = unsafe {
-        CreateWindowExW(
-            0,
-            WC_TREEVIEWW,
-            ptr::null(),
-            tree_style(),
-            0,
-            0,
-            0,
-            0,
-            hwnd,
-            2 as HMENU,
-            instance(),
-            ptr::null(),
-        )
-    };
-    if tree.is_null() {
-        eprintln!(
-            "list_shell could not create the tree view: {}",
-            last_error()
-        );
-        return Err(1);
-    }
+    let tree = create_control(
+        hwnd,
+        WC_TREEVIEWW,
+        "",
+        tree_style(),
+        0,
+        ID_TREE,
+        "tree view",
+    )?;
+    let back = create_control(
+        hwnd,
+        WC_BUTTONW,
+        "Back",
+        button_style(),
+        0,
+        ID_BACK,
+        "Back button",
+    )?;
+    let forward = create_control(
+        hwnd,
+        WC_BUTTONW,
+        "Forward",
+        button_style(),
+        0,
+        ID_FORWARD,
+        "Forward button",
+    )?;
+    let address = create_control(
+        hwnd,
+        WC_EDITW,
+        &start.root,
+        address_style(),
+        WS_EX_CLIENTEDGE,
+        ID_ADDRESS,
+        "address bar",
+    )?;
 
     let root = start.root.clone();
     let polling = !start.rows.is_settled();
@@ -246,6 +287,14 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
         shell: start.shell,
         list,
         tree,
+        back,
+        forward,
+        address,
+        history: History::start(root.clone()),
+        current: root.clone(),
+        tree_root: root.clone(),
+        pending: None,
+        suppress_select: false,
         opened: start.opened,
         rows: start.rows,
         nodes: Vec::new(),
@@ -256,6 +305,7 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(state) as isize);
     }
     insert_root(hwnd, &root);
+    update_nav_buttons(hwnd);
 
     fit_panes(hwnd);
     unsafe { ShowWindow(hwnd, SW_SHOW) };
@@ -274,6 +324,40 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
         }
     }
     Ok(())
+}
+
+fn create_control(
+    parent: HWND,
+    class: windows_sys::core::PCWSTR,
+    text: &str,
+    style: WINDOW_STYLE,
+    ex_style: WINDOW_EX_STYLE,
+    id: isize,
+    what: &str,
+) -> Result<HWND, u8> {
+    let text = wide(text);
+    let hwnd = unsafe {
+        CreateWindowExW(
+            ex_style,
+            class,
+            text.as_ptr(),
+            style,
+            0,
+            0,
+            0,
+            0,
+            parent,
+            id as HMENU,
+            instance(),
+            ptr::null(),
+        )
+    };
+    if hwnd.is_null() {
+        eprintln!("list_shell could not create the {what}: {}", last_error());
+        Err(1)
+    } else {
+        Ok(hwnd)
+    }
 }
 
 fn tree_style() -> WINDOW_STYLE {
@@ -295,6 +379,14 @@ fn list_style() -> WINDOW_STYLE {
         | LVS_OWNERDATA
         | LVS_SHOWSELALWAYS
         | LVS_NOSORTHEADER
+}
+
+fn button_style() -> WINDOW_STYLE {
+    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as WINDOW_STYLE
+}
+
+fn address_style() -> WINDOW_STYLE {
+    WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL as WINDOW_STYLE
 }
 
 fn insert_name_column(list: HWND) {
@@ -340,11 +432,48 @@ fn message_loop() -> ExitCode {
             eprintln!("list_shell message loop failed: {}", last_error());
             return ExitCode::from(1);
         }
+        if intercept(&message) {
+            continue;
+        }
         unsafe {
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
     }
+}
+
+/// Alt+Left, Alt+Right, and Enter in the address bar. The focused child would
+/// otherwise eat those keys. Enter is not dispatched, so the edit does not beep.
+fn intercept(message: &MSG) -> bool {
+    if message.hwnd.is_null() {
+        return false;
+    }
+    let root = unsafe { GetAncestor(message.hwnd, GA_ROOT) };
+    if root.is_null() || state_mut(root).is_none() {
+        return false;
+    }
+    match message.message {
+        WM_SYSKEYDOWN => match message.wParam as u16 {
+            VK_LEFT => {
+                go_back(root);
+                true
+            }
+            VK_RIGHT => {
+                go_forward(root);
+                true
+            }
+            _ => false,
+        },
+        WM_KEYDOWN if message.wParam == VK_RETURN as WPARAM && is_address(root, message.hwnd) => {
+            submit_address(root);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn is_address(hwnd: HWND, candidate: HWND) -> bool {
+    state_mut(hwnd).is_some_and(|state| state.address == candidate)
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -359,6 +488,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             0
         }
+        WM_COMMAND => {
+            on_command(hwnd, wparam);
+            0
+        }
         WM_NOTIFY => on_notify(hwnd, lparam),
         WM_DESTROY => {
             on_destroy(hwnd);
@@ -368,7 +501,246 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     }
 }
 
+fn on_command(hwnd: HWND, wparam: WPARAM) {
+    let id = (wparam & 0xffff) as isize;
+    let code = ((wparam >> 16) & 0xffff) as u32;
+    if code != BN_CLICKED {
+        return;
+    }
+    match id {
+        ID_BACK => go_back(hwnd),
+        ID_FORWARD => go_forward(hwnd),
+        _ => {}
+    }
+}
+
+fn go_back(hwnd: HWND) {
+    let Some(path) = state_mut(hwnd).and_then(|state| state.history.previous().map(str::to_string))
+    else {
+        return;
+    };
+    request_navigation(hwnd, path, NavKind::Back);
+}
+
+fn go_forward(hwnd: HWND) {
+    let Some(path) =
+        state_mut(hwnd).and_then(|state| state.history.following().map(str::to_string))
+    else {
+        return;
+    };
+    request_navigation(hwnd, path, NavKind::Forward);
+}
+
+fn submit_address(hwnd: HWND) {
+    let Some(address) = state_mut(hwnd).map(|state| state.address) else {
+        return;
+    };
+    let Some(path) = normalize_address(&control_text(address)) else {
+        return;
+    };
+    request_navigation(hwnd, path, NavKind::Push);
+}
+
+fn request_navigation(hwnd: HWND, path: String, kind: NavKind) {
+    if path.is_empty() {
+        return;
+    }
+    if kind == NavKind::Push && state_mut(hwnd).is_some_and(|state| state.history.current() == path)
+    {
+        if let Some(state) = state_mut(hwnd) {
+            state.pending = None;
+        }
+        return;
+    }
+    if let Some(state) = state_mut(hwnd) {
+        state.pending = Some(PendingNav { path, kind });
+    }
+    try_pending(hwnd);
+}
+
+/// Open `pending` without blocking. A busy volume stays pending for the timer.
+/// The rows already on screen stay until this returns `Ok`.
+fn try_pending(hwnd: HWND) {
+    let Some(pending) = state_mut(hwnd).and_then(|state| state.pending.clone()) else {
+        return;
+    };
+    let Some(shell) = state_mut(hwnd).map(|state| state.shell.clone()) else {
+        return;
+    };
+    let directory = Path::new(pending.path.clone());
+    let volume = VolumeId::from_directory(&directory);
+    let target_key = volume.key().to_string();
+    release_for_navigation(hwnd, &target_key);
+    match shell.open(volume, directory) {
+        Ok(opened) => {
+            if let Some(state) = state_mut(hwnd) {
+                state.pending = None;
+                commit_history(state, &pending);
+            }
+            present_directory(hwnd, &pending.path, opened);
+            follow_tree(hwnd, &pending.path);
+            update_nav_buttons(hwnd);
+        }
+        Err(EnumError::VolumeBusy) => ensure_timer(hwnd),
+        Err(_) => {
+            if let Some(state) = state_mut(hwnd) {
+                state.pending = None;
+            }
+        }
+    }
+}
+
+fn commit_history(state: &mut ListWindow, pending: &PendingNav) {
+    match pending.kind {
+        NavKind::Push => {
+            let _ = state.history.go(&pending.path);
+        }
+        NavKind::Back => {
+            let _ = state.history.back();
+        }
+        NavKind::Forward => {
+            let _ = state.history.forward();
+        }
+    }
+}
+
+fn present_directory(hwnd: HWND, path: &str, mut opened: OpenedDirectory) {
+    let rows = DirectoryRows::from_cached(opened.cached.take());
+    let shown = rows.shown().len();
+    let needs_poll = !rows.is_settled();
+    let Some((list, address)) = (|| {
+        let state = state_mut(hwnd)?;
+        state.rows = rows;
+        state.opened = Some(opened);
+        state.current = path.to_string();
+        Some((state.list, state.address))
+    })() else {
+        return;
+    };
+    set_count(list, shown);
+    set_control_text(address, path);
+    set_caption(hwnd, path);
+    // Paint the cached count before the timer, or this function's caller, polls.
+    unsafe { UpdateWindow(list) };
+    if needs_poll {
+        ensure_timer(hwnd);
+    }
+}
+
+fn follow_tree(hwnd: HWND, target: &str) {
+    let Some(root) = state_mut(hwnd).map(|state| state.tree_root.clone()) else {
+        return;
+    };
+    match tree_root(&root, target) {
+        TreeRoot::Replace => replace_tree_root(hwnd, target),
+        TreeRoot::Keep => {
+            if let Some(index) = find_node_path(hwnd, target) {
+                select_node(hwnd, index);
+            }
+        }
+    }
+}
+
+fn replace_tree_root(hwnd: HWND, path: &str) {
+    let Some(tree) = tree_handle(hwnd) else {
+        return;
+    };
+    if let Some(state) = state_mut(hwnd) {
+        state.suppress_select = true;
+        for node in &mut state.nodes {
+            if let Some(opened) = node.opened.take() {
+                opened.cancel();
+            }
+        }
+    }
+    unsafe {
+        SendMessageW(tree, TVM_DELETEITEM, 0, TVI_ROOT as LPARAM);
+    }
+    if let Some(state) = state_mut(hwnd) {
+        state.nodes.clear();
+        state.tree_root = path.to_string();
+        state.suppress_select = false;
+    }
+    insert_root(hwnd, path);
+}
+
+fn select_node(hwnd: HWND, index: usize) {
+    let Some((tree, item)) = node_item(hwnd, index) else {
+        return;
+    };
+    if let Some(state) = state_mut(hwnd) {
+        state.suppress_select = true;
+    }
+    unsafe {
+        SendMessageW(tree, TVM_SELECTITEM, TVGN_CARET as WPARAM, item as LPARAM);
+    }
+    if let Some(state) = state_mut(hwnd) {
+        state.suppress_select = false;
+    }
+}
+
+/// Cancel the list, and any tree listing on `target_key`, so the next open can
+/// take that volume's worker. An expand that had not inserted children can be
+/// tried again. Children already inserted stay.
+fn release_for_navigation(hwnd: HWND, target_key: &str) {
+    let mut rearm = Vec::new();
+    if let Some(state) = state_mut(hwnd) {
+        if let Some(opened) = state.opened.take() {
+            opened.cancel();
+        }
+        for (index, node) in state.nodes.iter_mut().enumerate() {
+            if node.removed {
+                continue;
+            }
+            let volume = VolumeId::from_directory(&Path::new(node.path.clone()));
+            if volume.key() != target_key {
+                continue;
+            }
+            let Some(opened) = node.opened.take() else {
+                continue;
+            };
+            opened.cancel();
+            let unfinished = node
+                .expansion
+                .as_ref()
+                .is_some_and(|expansion| !expansion.is_settled());
+            if !unfinished {
+                continue;
+            }
+            if node.child_indices.is_empty() {
+                node.expansion = None;
+                rearm.push(index);
+            } else if let Some(expansion) = node.expansion.as_mut() {
+                expansion.stop();
+            }
+        }
+    }
+    for index in rearm {
+        if let Some((tree, item)) = node_item(hwnd, index) {
+            set_child_flag(tree, item, 1);
+        }
+    }
+}
+
+fn update_nav_buttons(hwnd: HWND) {
+    let Some((back, forward, can_back, can_forward)) = state_mut(hwnd).map(|state| {
+        (
+            state.back,
+            state.forward,
+            state.history.can_back(),
+            state.history.can_forward(),
+        )
+    }) else {
+        return;
+    };
+    unsafe {
+        EnableWindow(back, i32::from(u8::from(can_back)));
+        EnableWindow(forward, i32::from(u8::from(can_forward)));
+    }
+}
+
 fn on_timer(hwnd: HWND) {
+    try_pending(hwnd);
     let Some(list) = list_handle(hwnd) else {
         return;
     };
@@ -379,7 +751,9 @@ fn on_timer(hwnd: HWND) {
         let change = drain(state);
         let shown = state.rows.shown().len();
         let (tree_changes, settled_nodes) = drain_tree(state);
-        let idle = state.rows.is_settled() && state.nodes.iter().all(|node| node.opened.is_none());
+        let idle = state.pending.is_none()
+            && state.rows.is_settled()
+            && state.nodes.iter().all(|node| node.opened.is_none());
         (change, shown, tree_changes, settled_nodes, idle)
     };
     paint(list, change, shown);
@@ -476,7 +850,12 @@ fn on_notify(hwnd: HWND, lparam: LPARAM) -> LRESULT {
             on_list_dispinfo(hwnd, lparam);
             0
         }
+        LVN_ITEMACTIVATE => {
+            on_item_activate(hwnd, lparam);
+            0
+        }
         TVN_ITEMEXPANDINGW => on_item_expanding(hwnd, lparam),
+        TVN_SELCHANGEDW => on_selection(hwnd, lparam),
         _ => 0,
     }
 }
@@ -497,6 +876,48 @@ fn on_list_dispinfo(hwnd: HWND, lparam: LPARAM) {
         Some(entry) => write_name(buffer, capacity, &entry.name),
         None => write_name(buffer, capacity, ""),
     }
+}
+
+fn on_item_activate(hwnd: HWND, lparam: LPARAM) {
+    let info = unsafe { &*(lparam as *const NMLISTVIEW) };
+    if info.iItem < 0 {
+        return;
+    }
+    let Some((current, name)) = activated_directory(hwnd, info.iItem as usize) else {
+        return;
+    };
+    request_navigation(hwnd, child_directory(&current, &name), NavKind::Push);
+}
+
+fn activated_directory(hwnd: HWND, index: usize) -> Option<(String, String)> {
+    let state = state_mut(hwnd)?;
+    let entry = state.rows.shown().get(index)?;
+    if !entry.is_directory || entry.name.is_empty() {
+        return None;
+    }
+    Some((state.current.clone(), entry.name.clone()))
+}
+
+fn on_selection(hwnd: HWND, lparam: LPARAM) -> LRESULT {
+    if state_mut(hwnd).is_some_and(|state| state.suppress_select) {
+        return 0;
+    }
+    let info = unsafe { &*(lparam as *const NMTREEVIEWW) };
+    let item = info.itemNew.hItem;
+    if item == 0 {
+        return 0;
+    }
+    let Some(index) = find_node(hwnd, item) else {
+        return 0;
+    };
+    let Some(path) = node_path(hwnd, index) else {
+        return 0;
+    };
+    if state_mut(hwnd).is_some_and(|state| same_directory(&state.current, &path)) {
+        return 0;
+    }
+    request_navigation(hwnd, path, NavKind::Push);
+    0
 }
 
 /// `TRUE` refuses the expand. A busy volume is refused instead of waited on.
@@ -749,6 +1170,17 @@ fn node_path(hwnd: HWND, index: usize) -> Option<String> {
     }
 }
 
+fn node_item(hwnd: HWND, index: usize) -> Option<(HWND, HTREEITEM)> {
+    let state = state_mut(hwnd)?;
+    let tree = state.tree;
+    let node = state.nodes.get(index)?;
+    if node.removed || node.item == 0 {
+        None
+    } else {
+        Some((tree, node.item))
+    }
+}
+
 fn node_insert_target(hwnd: HWND, index: usize) -> Option<(HWND, HTREEITEM, String)> {
     let state = state_mut(hwnd)?;
     let tree = state.tree;
@@ -767,6 +1199,14 @@ fn find_node(hwnd: HWND, item: HTREEITEM) -> Option<usize> {
         .position(|node| !node.removed && node.item == item)
 }
 
+fn find_node_path(hwnd: HWND, path: &str) -> Option<usize> {
+    let state = state_mut(hwnd)?;
+    state
+        .nodes
+        .iter()
+        .position(|node| !node.removed && same_directory(&node.path, path))
+}
+
 fn tree_handle(hwnd: HWND) -> Option<HWND> {
     state_mut(hwnd).map(|state| state.tree)
 }
@@ -775,7 +1215,11 @@ fn fit_panes(hwnd: HWND) {
     let Some(list) = list_handle(hwnd) else {
         return;
     };
-    let tree = tree_handle(hwnd);
+    let Some((tree, back, forward, address)) =
+        state_mut(hwnd).map(|state| (state.tree, state.back, state.forward, state.address))
+    else {
+        return;
+    };
     let mut rect = RECT {
         left: 0,
         top: 0,
@@ -786,12 +1230,18 @@ fn fit_panes(hwnd: HWND) {
         GetClientRect(hwnd, &mut rect);
         let width = rect.right - rect.left;
         let height = rect.bottom - rect.top;
+        MoveWindow(back, 0, 0, BACK_WIDTH, NAV_HEIGHT, 1);
+        let forward_x = BACK_WIDTH + NAV_GAP;
+        MoveWindow(forward, forward_x, 0, FORWARD_WIDTH, NAV_HEIGHT, 1);
+        let address_x = forward_x + FORWARD_WIDTH + NAV_GAP;
+        let address_width = (width - address_x).max(0);
+        MoveWindow(address, address_x, 0, address_width, NAV_HEIGHT, 1);
+        let top = NAV_HEIGHT + NAV_GAP;
+        let body = (height - top).max(0);
         let tree_width = TREE_WIDTH.min(width.max(0));
         let list_width = (width - tree_width).max(0);
-        if let Some(tree) = tree {
-            MoveWindow(tree, 0, 0, tree_width, height, 1);
-        }
-        MoveWindow(list, tree_width, 0, list_width, height, 1);
+        MoveWindow(tree, 0, top, tree_width, body, 1);
+        MoveWindow(list, tree_width, top, list_width, body, 1);
         SendMessageW(list, LVM_SETCOLUMNWIDTH, 0, list_width as LPARAM);
     }
 }
@@ -828,6 +1278,29 @@ fn state_mut(hwnd: HWND) -> Option<&'static mut ListWindow> {
     } else {
         Some(unsafe { &mut *raw })
     }
+}
+
+fn set_caption(hwnd: HWND, path: &str) {
+    let title = wide(&format!("Rapid Explorer — {path}"));
+    unsafe { SetWindowTextW(hwnd, title.as_ptr()) };
+}
+
+fn set_control_text(hwnd: HWND, text: &str) {
+    let text = wide(text);
+    unsafe { SetWindowTextW(hwnd, text.as_ptr()) };
+}
+
+fn control_text(hwnd: HWND) -> String {
+    let len = unsafe { GetWindowTextLengthW(hwnd) };
+    if len <= 0 {
+        return String::new();
+    }
+    let mut buf = vec![0u16; len as usize + 1];
+    let written = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+    if written <= 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buf[..written as usize])
 }
 
 fn write_name(buffer: windows_sys::core::PWSTR, capacity: i32, name: &str) {
