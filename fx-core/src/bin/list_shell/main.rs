@@ -34,5 +34,6 @@ fn run() -> ExitCode {
 
 #[cfg(windows)]
 fn run() -> ExitCode {
+    fx_core::dump::install_beside_exe();
     window::run()
 }
