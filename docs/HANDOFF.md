@@ -1,6 +1,6 @@
 # Windows File Explorer — Coding Agent Handoff
 
-Status as of 2026-10-22. Owner: AatozInnoInc. Phase: `fx-core` enumerates directories, caches finished listings, and exposes the in-process `shell` module. `list_shell` shows a directory in a virtual `SysListView32`, with a `SysTreeView32`, a one-line address bar, and Back/Forward. Choosing a tree folder, activating a directory row, or entering a path lists that directory. Each painted row uses a small icon cached by extension, with one shared directory icon. Eviction of directory listings is `TODO — define`. The context menu is not started. There is no Network neighborhood. SSD budgets are not measured. The UI/visual system exists as an HTML prototype. `theme-reference.html` is not in the repository.
+Status as of 2026-10-22. Owner: AatozInnoInc. Phase: `fx-core` enumerates directories, caches finished listings, and exposes the in-process `shell` module. `list_shell` shows a directory in a virtual `SysListView32`, with a `SysTreeView32`, a one-line address bar, Back/Forward, and a collapsed Network node. Choosing a tree folder, activating a directory row, entering a path, or choosing a connectable share lists that directory. Each painted row uses a small icon cached by extension, with one shared directory icon. The Network node stays empty until the user expands it. Eviction of directory listings is `TODO — define`. The context menu is not started. SSD budgets are not measured. The UI/visual system exists as an HTML prototype. `theme-reference.html` is not in the repository.
 
 ---
 
@@ -73,7 +73,7 @@ Shared kernel: `FileEntry`, `Path`, `VolumeId`.
 The split memory budget is deliberate: idle must stay low so leaks are detectable; active use may be generous for aggressive caching. Primary hardware target: SSD systems.
 
 ### Navigation control flow
-Cache hit is an explicit early exit (paint from cache, revalidate in background). Cache miss goes to that volume's worker, streams first batch for first paint, then fills. `list_shell` is that path. Its tree lists a folder's direct child directories only after that node expands. Tree selection, the address bar, Back, and Forward open a directory the same way. A busy volume leaves the current list in place and retries from the timer.
+Cache hit is an explicit early exit (paint from cache, revalidate in background). Cache miss goes to that volume's worker, streams first batch for first paint, then fills. `list_shell` is that path. Its tree lists a folder's direct child directories only after that node expands. Tree selection, the address bar, Back, and Forward open a directory the same way. A busy volume leaves the current list in place and retries from the timer. The Network node is a separate browse: it stays collapsed until expanded, streams places through `Shell::browse_network`, and does not use the listing cache. A connectable share then lists through the same navigation. A timeout is not retried automatically.
 
 ---
 
@@ -176,7 +176,7 @@ Implementation mapping: the HTML demo uses a `--sp` scale variable, Web Animatio
 
 - Design package is in this repository (`AatozInnoInc/FFE-Fast-File-Explorer`) as of 2026-10-19. It was drafted in Perplexity sessions on 2026-08-31 and 2026-09-22. Files: `README.md`, `CONTRIBUTING.md`, `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`, `docs/HANDOFF.md`, `docs/charts/context-map.md`, `docs/charts/navigation-flow.md`, `docs/theme-motion-spec.md`.
 - Enumeration crate: `fx-core/`. Windows directory reads use `FindFirstFileExW`. Portable tests use a scripted source. SSD budget numbers are not measured yet. Run `fx-core/examples/measure_listing.rs` on a Windows SSD when a real directory is available.
-- List window: `fx-core/src/bin/list_shell.rs`. A virtual `SysListView32`, a `SysTreeView32` of child folders filled on expand, a one-line address bar, and Back/Forward. Calls `fx_core::shell` only. Windows only. Choosing a folder lists it. Small icons are cached by extension. There is no Network node.
+- List window: `fx-core/src/bin/list_shell.rs`. A virtual `SysListView32`, a `SysTreeView32` of child folders filled on expand, a one-line address bar, Back/Forward, and a collapsed Network node. Calls `fx_core::shell` only. Windows only. Choosing a folder or a connectable share lists it. Small icons are cached by extension. The Network node is not browsed until it expands.
 - Interactive HTML preview: Halo (8 palettes, Copper default), Lozenge, Deck, Strata, Vellum, with all 29 animations, a demo dock, reduced-motion toggle, and 0.25×–3× speed slider. `theme-reference.html` is still absent from the repository. The written spec is `docs/theme-motion-spec.md`.
 - Workflow templates: `AatozInnoInc/principal-engineer-skills/skills/autonomous-agentic-design-workflow/`.
 
@@ -247,12 +247,18 @@ Implementation mapping: the HTML demo uses a `--sp` scale variable, Web Animatio
 
 **Completed prompt.** The list's small image list stores one icon per file extension and one icon for every directory. `SHGetFileInfoW` is called with `SHGFI_USEFILEATTRIBUTES`, so the lookup does not open that file. The call runs once per key, and only when a painted row asks for the icon. Directories share one folder icon. A name with no extension, a leading dot, or a trailing dot uses the generic file icon. `archive.tar.gz` uses `gz`. Failed lookups are remembered too, so a miss is not repeated per row. No thumbnails, context menu, Network node, IPC, or C ABI. The UI thread does not enumerate. Questions 1–6 stay open. Directory-listing eviction and the SSD budgets were not invented.
 
+### 2026-10-22T17:28:46Z — Lazy Network node
+
+**Signed off by:** Grok 4.7, implementation pass.
+
+**Completed prompt.** `list_shell` shows a Network node beside the opened directory. It is collapsed and empty at startup. Expanding it calls `Shell::browse_network` and inserts places as batches arrive. A container expands through another browse. A connectable share with a UNC lists that path through the existing navigation. The browse uses the existing 2 second timeout. Timeout, cancel, and failure keep the places already shown and are not retried. Results are not stored in the listing cache. The UI thread does not call WNet and does not enumerate. A busy parent refuses the expand. Replacing the folder-tree root leaves a new collapsed Network node and does not browse it. No thumbnails, context menu, IPC, or C ABI. Questions 1–6 stay open. Directory-listing eviction and the SSD budgets were not invented.
+
 ---
 
 ## 11. Prompt for Next Agent
 
-> The window is `fx-core`'s `list_shell` binary. It lists a chosen directory through `fx_core::shell` and paints a small icon from an extension cache. Do not add IPC or a C ABI. Do not bypass `shell` with `ListingCache` or `enumerate`.
+> `list_shell` lists a chosen directory through `fx_core::shell`, paints a small icon from an extension cache, and browses the Network node only after the user expands it. Do not add IPC or a C ABI. Do not bypass `shell` with `ListingCache` or `enumerate`.
 >
-> Add a collapsed Network node beside the folder tree. It is not a child of the opened directory, and it stays empty until the user expands it. Expanding it calls `Shell::browse_network`. Insert only places already returned. A container expands through another browse of that place. A connectable share with a UNC lists that path through the navigation already in the window. Use the existing 2 second network timeout. Do not auto-retry. Do not store the places in the listing cache. Do not call WNet from the UI thread. Do not enumerate the neighborhood at startup. A slow network must not stall the window.
+> Add the Direct2D/DirectWrite owner-draw layer for custom columns on the virtual list. Keep the existing `SysListView32` owner-data notifications as the source of row data. Do not generate thumbnails. The UI thread still never enumerates, and a slow volume still must not stall the window.
 >
-> Do not build thumbnails or a context menu. Do not decide questions 1–6. Do not invent an eviction size. SSD budgets are still unmeasured; do not invent those numbers. Reduced motion and the theme system are out of this slice.
+> Do not build a context menu. Do not decide questions 1–6. Do not invent an eviction size. SSD budgets are still unmeasured; do not invent those numbers. Reduced motion and the theme system are out of this slice.

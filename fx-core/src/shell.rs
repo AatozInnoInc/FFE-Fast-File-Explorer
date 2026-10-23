@@ -58,6 +58,15 @@ impl Shell {
         }
     }
 
+    /// Start a network-neighborhood browse.
+    ///
+    /// `parent` `None` is the Network root. A UNC browses that container.
+    /// This does not wait, does not touch the listing cache, and does not call
+    /// WNet on the caller's thread.
+    pub fn browse_network(parent: Option<&str>) -> Result<crate::NetworkBrowse, EnumError> {
+        crate::network::browse(parent)
+    }
+
     fn open_with(&self, options: ListingOptions) -> Result<OpenedDirectory, EnumError> {
         let opened = self.cache.open(options)?;
         Ok(OpenedDirectory {
@@ -238,5 +247,22 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| matches!(event, ListingEvent::Cancelled)));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn browse_network_reports_windows_only() {
+        let started = Instant::now();
+        let result = Shell::browse_network(None);
+        assert!(
+            started.elapsed() < Duration::from_millis(50),
+            "browse_network blocked for {:?}",
+            started.elapsed()
+        );
+        assert!(matches!(result, Err(EnumError::WindowsOnly)));
+        assert!(matches!(
+            Shell::browse_network(Some(r"\\server\share")),
+            Err(EnumError::WindowsOnly)
+        ));
     }
 }

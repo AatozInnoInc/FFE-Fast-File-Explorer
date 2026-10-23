@@ -8,6 +8,7 @@ mod cache;
 mod cancel;
 mod enumerate;
 mod kernel;
+mod network;
 pub mod shell;
 mod source;
 
@@ -16,4 +17,5 @@ mod windows;
 
 pub use enumerate::{ListingEvent, TryEvent, DEFAULT_BATCH_SIZE, DEFAULT_NETWORK_TIMEOUT};
 pub use kernel::{EnumError, FileEntry, Path, VolumeId, VolumeKind};
+pub use network::{BrowseEvent, NetworkBrowse, NetworkPlace, TryBrowse};
 pub use shell::{OpenedDirectory, Shell};
