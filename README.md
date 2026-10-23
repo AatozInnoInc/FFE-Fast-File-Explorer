@@ -8,7 +8,7 @@ Windows 11 File Explorer is slow to render even on a fresh install because of la
 
 ## Status
 
-`fx-core` enumerates directories with one worker per volume, caches a finished listing, and exposes `shell` (open, poll, cancel, and a network browse that does not use that cache). `list_shell` is a Win32 `SysListView32` in virtual mode, with a `SysTreeView32` of child folders, a one-line address bar, Back/Forward, and a collapsed Network node. Expanding a folder lists its children through `shell`. Choosing a folder, entering a path, going back, or choosing a connectable share lists that directory. Painted rows show a small icon cached by extension. Size and Date modified are DirectWrite columns; Name stays native. Visible image rows request thumbnails on a background pool. There is no context menu yet. See `docs/ROADMAP.md`.
+`fx-core` enumerates directories with one worker per volume, caches a finished listing, and exposes `shell` (open, poll, cancel, and a network browse that does not use that cache). `list_shell` is a Win32 `SysListView32` in virtual mode, with a `SysTreeView32` of child folders, a one-line address bar, Back/Forward, and a collapsed Network node. Expanding a folder lists its children through `shell`. Choosing a folder, entering a path, going back, or choosing a connectable share lists that directory. Painted rows show a small icon cached by extension. Size and Date modified are DirectWrite columns; Name stays native. Visible image rows request thumbnails on a background pool. The list has a native context menu for Copy, Cut, Paste, Rename, Delete, and Properties. More options is shown and is not an in-process shell extension. See `docs/ROADMAP.md`.
 
 ## Getting started
 
