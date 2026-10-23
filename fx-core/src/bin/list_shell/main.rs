@@ -14,6 +14,7 @@ mod icons;
 mod images;
 mod nav;
 mod places;
+mod query;
 mod rows;
 mod timeout;
 mod tree;
