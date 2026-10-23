@@ -1,4 +1,4 @@
-//! One top-level window: address bar, folder tree, and a virtual list.
+//! One top-level window: address bar, folder tree, and two virtual lists.
 //!
 //! The message loop is `GetMessageW`. Enumeration is `Shell::poll` on a timer.
 //! That call does not wait, and this thread does not read a directory. Choosing
@@ -16,8 +16,9 @@
 //! stores typed text and does not rank on the keystroke. The timer copies
 //! settled local listings into the filename index and ranks those names. An
 //! empty or whitespace query leaves the directory listing in place. Names
-//! that later disappear stay indexed. A Network node stays collapsed until
-//! the user expands it.
+//! that later disappear stay indexed. The left and right lists start at the
+//! same path. Left is active. Switching panes changes focus and leaves both
+//! paths as they are. A Network node stays collapsed until the user expands it.
 
 use std::collections::HashMap;
 use std::mem;
@@ -54,7 +55,7 @@ use windows_sys::Win32::UI::Controls::{
     WC_LISTVIEWW, WC_TREEVIEWW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    EnableWindow, SetFocus, VK_LEFT, VK_RETURN, VK_RIGHT,
+    EnableWindow, SetFocus, VK_F6, VK_LEFT, VK_RETURN, VK_RIGHT,
 };
 use windows_sys::Win32::UI::Shell::{
     SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_SMALLICON, SHGFI_USEFILEATTRIBUTES,
@@ -87,6 +88,7 @@ use crate::file_ops::{self, FileOp, Op};
 use crate::icons::{icon_key, IconCache, IconKey};
 use crate::images;
 use crate::nav::{normalize_address, same_directory, tree_root, History, TreeRoot};
+use crate::panes::{PaneId, Panes};
 use crate::places::{PlaceChange, PlaceList};
 use crate::query::Query;
 use crate::rows::{DirectoryRows, RowChange};
@@ -104,14 +106,20 @@ const NAV_GAP: i32 = 4;
 const BACK_WIDTH: i32 = 72;
 const FORWARD_WIDTH: i32 = 84;
 const ID_LIST: isize = 1;
+const ID_LIST_RIGHT: isize = 8;
 const ID_TREE: isize = 2;
 const ID_BACK: isize = 3;
 const ID_FORWARD: isize = 4;
 const ID_ADDRESS: isize = 5;
 const ID_TIMEOUT: isize = 6;
 const ID_SEARCH: isize = 7;
+const ID_OTHER: isize = 9;
 /// Width of the search box. Not a performance budget.
 const SEARCH_WIDTH: i32 = 180;
+/// Width of the button that switches the active pane. Not a performance budget.
+const OTHER_WIDTH: i32 = 64;
+/// `NM_SETFOCUS`. A list sends this when it gains focus.
+const NM_SETFOCUS: u32 = 4294967289;
 /// `EM_SETCUEBANNER`.
 const EM_SETCUEBANNER: u32 = 0x1501;
 /// Width of the Timeout button. Not a performance budget.
@@ -121,39 +129,35 @@ const CLASS_NAME: windows_sys::core::PCWSTR = w!("RapidExplorerList");
 
 struct ListWindow {
     shell: Shell,
-    list: HWND,
+    /// Which pane receives navigation, and the path stored for each pane.
+    panes: Panes,
+    left: PaneView,
+    right: PaneView,
     tree: HWND,
     back: HWND,
     forward: HWND,
     address: HWND,
-    history: History,
-    /// Directory whose rows are on screen. Unchanged until a navigation opens.
-    current: String,
     /// Path of the tree's root item. Not rewritten when a descendant is listed.
     tree_root: String,
-    /// A path whose volume worker was busy. The timer retries it. The list stays.
-    pending: Option<PendingNav>,
     /// `TVM_SELECTITEM` reenters with `TVN_SELCHANGED`. That must not navigate again.
     suppress_select: bool,
-    opened: Option<OpenedDirectory>,
-    rows: DirectoryRows,
     /// Image-list indexes. One directory icon, and one icon per extension.
     icons: IconCache<i32>,
-    /// Small-icon image list owned by the list view. Zero when it was not created.
+    /// Small-icon image list shared by both lists. Zero when it was not created.
     images: HIMAGELIST,
     nodes: Vec<FolderNode>,
-    /// The timer is running. This is not "the list is still reading".
+    /// The timer is running. This is not "a list is still reading".
     polling: bool,
     /// RGBA thumbnails. The cache is unbounded. Eviction: TODO — define.
     thumbs: ThumbCache,
-    /// Tickets for the directory on screen. Navigation cancels these.
-    thumb_jobs: HashMap<String, ThumbJob>,
     /// Paste, delete, or rename running off this thread. At most one.
     file_op: Option<FileOp>,
     /// More options helper. At most one. Drop kills it and does not join.
     menu_host: Option<HelperSession>,
     /// Network-timeout button.
     timeout: HWND,
+    /// Button that switches the active pane without changing either path.
+    other: HWND,
     /// `rapid-explorer-settings.txt` beside this executable.
     settings_file: std::path::PathBuf,
     /// Search box. Typing does not rank; the timer does.
@@ -161,12 +165,26 @@ struct ListWindow {
     query: Query,
     /// Names this window has already listed. Eviction: TODO — define.
     index: FilenameIndex,
-    /// Last directory copied into `index`.
-    indexed_path: String,
-    /// Ranked records while [`Query::is_active`].
+    /// Ranked records while [`Query::is_active`], drawn in the active list.
     search_hits: Vec<IndexRecord>,
     /// Query text already ranked. Differs from [`Query::text`] until the timer runs.
     search_applied: String,
+}
+
+/// One list, its history, and the listing it is showing.
+struct PaneView {
+    list: HWND,
+    history: History,
+    /// Directory whose rows are on screen. Unchanged until a navigation opens.
+    current: String,
+    /// A path whose volume worker was busy. The timer retries it. The list stays.
+    pending: Option<PendingNav>,
+    opened: Option<OpenedDirectory>,
+    rows: DirectoryRows,
+    /// Tickets for this pane's visible rows. Navigation of this pane cancels them.
+    thumb_jobs: HashMap<String, ThumbJob>,
+    /// Last directory copied from this pane into the window index.
+    indexed_path: String,
 }
 
 struct ThumbJob {
@@ -361,26 +379,14 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
     };
     let _ = unsafe { InitCommonControlsEx(&controls) };
 
-    let list = create_control(
-        hwnd,
-        WC_LISTVIEWW,
-        "",
-        list_style(),
-        0,
-        ID_LIST,
-        "list view",
-    )?;
-    let extended = LVS_EX_DOUBLEBUFFER | LVS_EX_FULLROWSELECT;
-    unsafe {
-        SendMessageW(
-            list,
-            LVM_SETEXTENDEDLISTVIEWSTYLE,
-            extended as WPARAM,
-            extended as LPARAM,
-        );
-    }
-    insert_columns(list);
+    let list = create_list(hwnd, ID_LIST, "left list")?;
+    let right_list = create_list(hwnd, ID_LIST_RIGHT, "right list")?;
     let images = create_image_list(list);
+    if images != 0 {
+        unsafe {
+            SendMessageW(right_list, LVM_SETIMAGELIST, LVSIL_SMALL as WPARAM, images);
+        }
+    }
 
     let tree = create_control(
         hwnd,
@@ -427,6 +433,15 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
         ID_TIMEOUT,
         "timeout button",
     )?;
+    let other = create_control(
+        hwnd,
+        WC_BUTTONW,
+        "Other",
+        button_style(),
+        0,
+        ID_OTHER,
+        "other pane button",
+    )?;
     let search = create_control(
         hwnd,
         WC_EDITW,
@@ -442,39 +457,58 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
     }
 
     let root = start.root.clone();
+    let mut right_rows = DirectoryRows::from_cached(None);
+    right_rows.stop();
     let polling = !start.rows.is_settled();
     let state = Box::new(ListWindow {
         shell: start.shell,
-        list,
+        panes: Panes::start(root.clone()),
+        left: PaneView {
+            list,
+            history: History::start(root.clone()),
+            current: root.clone(),
+            pending: None,
+            opened: start.opened,
+            rows: start.rows,
+            thumb_jobs: HashMap::new(),
+            indexed_path: String::new(),
+        },
+        right: PaneView {
+            list: right_list,
+            history: History::start(root.clone()),
+            current: root.clone(),
+            pending: Some(PendingNav {
+                path: root.clone(),
+                kind: NavKind::Refresh,
+            }),
+            opened: None,
+            rows: right_rows,
+            thumb_jobs: HashMap::new(),
+            indexed_path: String::new(),
+        },
         tree,
         back,
         forward,
         address,
-        history: History::start(root.clone()),
-        current: root.clone(),
         tree_root: root.clone(),
-        pending: None,
         suppress_select: false,
-        opened: start.opened,
-        rows: start.rows,
         icons: IconCache::new(),
         images,
         nodes: Vec::new(),
         polling,
         thumbs: ThumbCache::with_decoder(images::decode_image),
-        thumb_jobs: HashMap::new(),
         file_op: None,
         menu_host: None,
         timeout,
+        other,
         settings_file: start.settings_file,
         search,
         query: Query::new(),
         index: FilenameIndex::new(),
-        indexed_path: String::new(),
         search_hits: Vec::new(),
         search_applied: String::new(),
     });
-    let shown = state.rows.shown().len();
+    let shown = state.left.rows.shown().len();
     unsafe {
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(state) as isize);
     }
@@ -492,13 +526,41 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
         UpdateWindow(list);
         SetFocus(list);
     }
-    if polling && unsafe { SetTimer(hwnd, TIMER_ID, POLL_INTERVAL_MS, None) } == 0 {
+    // The right pane lists the same path. A busy volume stays pending for the timer.
+    try_pending(hwnd);
+    let needs_timer = state_mut(hwnd).is_some_and(|state| {
+        state.polling
+            || state.left.pending.is_some()
+            || state.right.pending.is_some()
+            || !state.left.rows.is_settled()
+            || !state.right.rows.is_settled()
+    });
+    if needs_timer && unsafe { SetTimer(hwnd, TIMER_ID, POLL_INTERVAL_MS, None) } == 0 {
         eprintln!("list_shell could not start polling: {}", last_error());
         if let Some(state) = state_mut(hwnd) {
             state.polling = false;
         }
+    } else if needs_timer {
+        if let Some(state) = state_mut(hwnd) {
+            state.polling = true;
+        }
     }
     Ok(())
+}
+
+fn create_list(parent: HWND, id: isize, what: &str) -> Result<HWND, u8> {
+    let list = create_control(parent, WC_LISTVIEWW, "", list_style(), 0, id, what)?;
+    let extended = LVS_EX_DOUBLEBUFFER | LVS_EX_FULLROWSELECT;
+    unsafe {
+        SendMessageW(
+            list,
+            LVM_SETEXTENDEDLISTVIEWSTYLE,
+            extended as WPARAM,
+            extended as LPARAM,
+        );
+    }
+    insert_columns(list);
+    Ok(list)
 }
 
 fn create_control(
@@ -647,6 +709,10 @@ fn intercept(message: &MSG) -> bool {
             }
             _ => false,
         },
+        WM_KEYDOWN if message.wParam == VK_F6 as WPARAM => {
+            toggle_pane(root);
+            true
+        }
         WM_KEYDOWN if message.wParam == VK_RETURN as WPARAM && is_address(root, message.hwnd) => {
             submit_address(root);
             true
@@ -701,6 +767,7 @@ fn on_command(hwnd: HWND, wparam: WPARAM) {
     match id {
         ID_BACK => go_back(hwnd),
         ID_FORWARD => go_forward(hwnd),
+        ID_OTHER => toggle_pane(hwnd),
         ID_TIMEOUT => edit_timeout(hwnd),
         _ => {}
     }
@@ -730,18 +797,19 @@ fn control_string(hwnd: HWND) -> String {
     String::from_utf16_lossy(&buf[..copied as usize])
 }
 
-fn index_listed(state: &mut ListWindow) {
-    if !state.rows.is_settled() || state.indexed_path == state.current {
-        return;
+fn index_pane(index: &mut FilenameIndex, pane: &mut PaneView) -> bool {
+    if !pane.rows.is_settled() || pane.indexed_path == pane.current {
+        return false;
     }
-    let volume = VolumeId::from_directory(&Path::new(state.current.clone()));
-    if volume.kind() == VolumeKind::Local {
-        for entry in state.rows.shown() {
+    let volume = VolumeId::from_directory(&Path::new(pane.current.clone()));
+    let indexed = volume.kind() == VolumeKind::Local;
+    if indexed {
+        for entry in pane.rows.shown() {
             if entry.name.is_empty() || entry.name == "." || entry.name == ".." {
                 continue;
             }
-            let path = child_directory(&state.current, &entry.name);
-            state.index.upsert(IndexRecord {
+            let path = child_directory(&pane.current, &entry.name);
+            index.upsert(IndexRecord {
                 path,
                 name: entry.name.clone(),
                 volume_key: volume.key().to_string(),
@@ -750,9 +818,9 @@ fn index_listed(state: &mut ListWindow) {
                 modified: entry.last_write,
             });
         }
-        state.search_applied.clear();
     }
-    state.indexed_path = state.current.clone();
+    pane.indexed_path = pane.current.clone();
+    indexed
 }
 
 fn apply_search(state: &mut ListWindow) -> bool {
@@ -760,7 +828,8 @@ fn apply_search(state: &mut ListWindow) -> bool {
         return false;
     }
     state.search_applied = state.query.text().to_string();
-    cancel_thumbs(state);
+    let active = state.panes.active();
+    cancel_pane_thumbs(pane_mut(state, active));
     if state.query.is_active() {
         state.search_hits = state
             .index
@@ -778,15 +847,16 @@ fn visible_len(state: &ListWindow) -> usize {
     if state.query.is_active() {
         state.search_hits.len()
     } else {
-        state.rows.shown().len()
+        pane_ref(state, state.panes.active()).rows.shown().len()
     }
 }
 
-fn visible_entry(state: &ListWindow, index: usize) -> Option<fx_core::FileEntry> {
-    if state.query.is_active() {
+fn visible_entry(state: &ListWindow, list: HWND, index: usize) -> Option<fx_core::FileEntry> {
+    let id = pane_id_from_list(state, list)?;
+    if state.query.is_active() && state.panes.active() == id {
         state.search_hits.get(index).map(file_entry_from_record)
     } else {
-        state.rows.shown().get(index).cloned()
+        pane_ref(state, id).rows.shown().get(index).cloned()
     }
 }
 
@@ -824,17 +894,24 @@ fn edit_timeout(hwnd: HWND) {
 }
 
 fn go_back(hwnd: HWND) {
-    let Some(path) = state_mut(hwnd).and_then(|state| state.history.previous().map(str::to_string))
-    else {
+    let Some(path) = state_mut(hwnd).and_then(|state| {
+        pane_ref(state, state.panes.active())
+            .history
+            .previous()
+            .map(str::to_string)
+    }) else {
         return;
     };
     request_navigation(hwnd, path, NavKind::Back);
 }
 
 fn go_forward(hwnd: HWND) {
-    let Some(path) =
-        state_mut(hwnd).and_then(|state| state.history.following().map(str::to_string))
-    else {
+    let Some(path) = state_mut(hwnd).and_then(|state| {
+        pane_ref(state, state.panes.active())
+            .history
+            .following()
+            .map(str::to_string)
+    }) else {
         return;
     };
     request_navigation(hwnd, path, NavKind::Forward);
@@ -854,23 +931,40 @@ fn request_navigation(hwnd: HWND, path: String, kind: NavKind) {
     if path.is_empty() {
         return;
     }
-    if kind == NavKind::Push && state_mut(hwnd).is_some_and(|state| state.history.current() == path)
+    let Some(id) = state_mut(hwnd).map(|state| state.panes.active()) else {
+        return;
+    };
+    if kind == NavKind::Push
+        && state_mut(hwnd).is_some_and(|state| pane_ref(state, id).history.current() == path)
     {
         if let Some(state) = state_mut(hwnd) {
-            state.pending = None;
+            pane_mut(state, id).pending = None;
         }
         return;
     }
     if let Some(state) = state_mut(hwnd) {
-        state.pending = Some(PendingNav { path, kind });
+        pane_mut(state, id).pending = Some(PendingNav { path, kind });
     }
     try_pending(hwnd);
 }
 
-/// Open `pending` without blocking. A busy volume stays pending for the timer.
-/// The rows already on screen stay until this returns `Ok`.
+/// Open each pane's pending path without blocking. A busy volume stays pending.
+/// The rows already on screen stay until that pane's open returns `Ok`.
 fn try_pending(hwnd: HWND) {
-    let Some(pending) = state_mut(hwnd).and_then(|state| state.pending.clone()) else {
+    let Some(first) = state_mut(hwnd).map(|state| state.panes.active()) else {
+        return;
+    };
+    let second = match first {
+        PaneId::Left => PaneId::Right,
+        PaneId::Right => PaneId::Left,
+    };
+    try_pane_pending(hwnd, first);
+    try_pane_pending(hwnd, second);
+}
+
+fn try_pane_pending(hwnd: HWND, id: PaneId) {
+    let Some(pending) = state_mut(hwnd).and_then(|state| pane_ref(state, id).pending.clone())
+    else {
         return;
     };
     let Some(shell) = state_mut(hwnd).map(|state| state.shell.clone()) else {
@@ -879,58 +973,74 @@ fn try_pending(hwnd: HWND) {
     let directory = Path::new(pending.path.clone());
     let volume = VolumeId::from_directory(&directory);
     let target_key = volume.key().to_string();
-    release_for_navigation(hwnd, &target_key);
+    release_for_navigation(hwnd, id, &target_key);
     match shell.open(volume, directory) {
         Ok(opened) => {
             if let Some(state) = state_mut(hwnd) {
-                state.pending = None;
-                commit_history(state, &pending);
+                let pane = pane_mut(state, id);
+                pane.pending = None;
+                commit_history(pane, &pending);
             }
-            present_directory(hwnd, &pending.path, opened);
-            follow_tree(hwnd, &pending.path);
-            update_nav_buttons(hwnd);
+            present_directory(hwnd, id, &pending.path, opened);
+            if state_mut(hwnd).is_some_and(|state| state.panes.active() == id) {
+                follow_tree(hwnd, &pending.path);
+                update_nav_buttons(hwnd);
+            }
         }
         Err(EnumError::VolumeBusy) => ensure_timer(hwnd),
         Err(_) => {
             if let Some(state) = state_mut(hwnd) {
-                state.pending = None;
+                pane_mut(state, id).pending = None;
             }
         }
     }
 }
 
-fn commit_history(state: &mut ListWindow, pending: &PendingNav) {
+fn commit_history(pane: &mut PaneView, pending: &PendingNav) {
     match pending.kind {
         NavKind::Push => {
-            let _ = state.history.go(&pending.path);
+            let _ = pane.history.go(&pending.path);
         }
         NavKind::Back => {
-            let _ = state.history.back();
+            let _ = pane.history.back();
         }
         NavKind::Forward => {
-            let _ = state.history.forward();
+            let _ = pane.history.forward();
         }
         NavKind::Refresh => {}
     }
 }
 
-fn present_directory(hwnd: HWND, path: &str, mut opened: OpenedDirectory) {
+fn present_directory(hwnd: HWND, id: PaneId, path: &str, mut opened: OpenedDirectory) {
     let rows = DirectoryRows::from_cached(opened.cached.take());
     let shown = rows.shown().len();
     let needs_poll = !rows.is_settled();
-    let Some((list, address)) = (|| {
+    let Some((list, address, active)) = (|| {
         let state = state_mut(hwnd)?;
-        cancel_thumbs(state);
-        state.rows = rows;
-        state.opened = Some(opened);
-        state.current = path.to_string();
-        Some((state.list, state.address))
+        let active = state.panes.active() == id;
+        let address = state.address;
+        {
+            let pane = pane_mut(state, id);
+            cancel_pane_thumbs(pane);
+            pane.rows = rows;
+            pane.opened = Some(opened);
+            pane.current = path.to_string();
+        }
+        if state.panes.active() == id {
+            state.panes.set_active_path(path);
+        } else {
+            state.panes.set_path(id, path);
+        }
+        let list = pane_ref(state, id).list;
+        Some((list, address, active))
     })() else {
         return;
     };
     set_count(list, shown);
-    set_control_text(address, path);
-    set_caption(hwnd, path);
+    if active {
+        set_control_text(address, path);
+        set_caption(hwnd, path);
+    }
     // Paint the cached count before the timer, or this function's caller, polls.
     unsafe { UpdateWindow(list) };
     if needs_poll {
@@ -992,10 +1102,10 @@ fn select_node(hwnd: HWND, index: usize) {
 /// Cancel the list, and any tree listing on `target_key`, so the next open can
 /// take that volume's worker. An expand that had not inserted children can be
 /// tried again. Children already inserted stay.
-fn release_for_navigation(hwnd: HWND, target_key: &str) {
+fn release_for_navigation(hwnd: HWND, id: PaneId, target_key: &str) {
     let mut rearm = Vec::new();
     if let Some(state) = state_mut(hwnd) {
-        if let Some(opened) = state.opened.take() {
+        if let Some(opened) = pane_mut(state, id).opened.take() {
             opened.cancel();
         }
         for (index, node) in state.nodes.iter_mut().enumerate() {
@@ -1037,8 +1147,8 @@ fn update_nav_buttons(hwnd: HWND) {
         (
             state.back,
             state.forward,
-            state.history.can_back(),
-            state.history.can_forward(),
+            pane_ref(state, state.panes.active()).history.can_back(),
+            pane_ref(state, state.panes.active()).history.can_forward(),
         )
     }) else {
         return;
@@ -1051,27 +1161,35 @@ fn update_nav_buttons(hwnd: HWND) {
 
 fn on_timer(hwnd: HWND) {
     try_pending(hwnd);
-    let Some(list) = list_handle(hwnd) else {
-        return;
-    };
-    let (change, shown, tree_changes, settled_nodes, idle, thumb_ready, search_refreshed) = {
+    let painted = {
         let Some(state) = state_mut(hwnd) else {
             return;
         };
-        let change = drain(state);
-        index_listed(state);
+        let mut left_change = drain_pane(&mut state.left);
+        let mut right_change = drain_pane(&mut state.right);
+        let indexed_left = index_pane(&mut state.index, &mut state.left);
+        let indexed_right = index_pane(&mut state.index, &mut state.right);
+        if indexed_left || indexed_right {
+            state.search_applied.clear();
+        }
         let search_refreshed = apply_search(state);
+        let active = state.panes.active();
+        if state.query.is_active() {
+            match active {
+                PaneId::Left => left_change = RowChange::Unchanged,
+                PaneId::Right => right_change = RowChange::Unchanged,
+            }
+        }
         let shown = visible_len(state);
-        let change = if state.query.is_active() {
-            RowChange::Unchanged
-        } else {
-            change
-        };
         let (tree_changes, settled_nodes) = drain_tree(state);
-        let thumb_ready = poll_thumbs(state);
-        let idle = state.pending.is_none()
-            && state.rows.is_settled()
-            && !thumbs_pending(state)
+        let left_thumbs = poll_pane_thumbs(&mut state.left);
+        let right_thumbs = poll_pane_thumbs(&mut state.right);
+        let idle = state.left.pending.is_none()
+            && state.right.pending.is_none()
+            && state.left.rows.is_settled()
+            && state.right.rows.is_settled()
+            && !pane_thumbs_pending(&state.left)
+            && !pane_thumbs_pending(&state.right)
             && !file_op_pending(state)
             && !menu_host_pending(state)
             && state.query.text() == state.search_applied
@@ -1080,21 +1198,71 @@ fn on_timer(hwnd: HWND) {
                 .iter()
                 .all(|node| node.opened.is_none() && node.browse.is_none());
         (
-            change,
+            state.left.list,
+            state.right.list,
+            left_change,
+            right_change,
+            state.left.rows.shown().len(),
+            state.right.rows.shown().len(),
+            active,
             shown,
             tree_changes,
             settled_nodes,
             idle,
-            thumb_ready,
+            left_thumbs,
+            right_thumbs,
             search_refreshed,
         )
     };
-    paint(list, change, shown);
+    let (
+        left_list,
+        right_list,
+        left_change,
+        right_change,
+        left_rows,
+        right_rows,
+        active,
+        shown,
+        tree_changes,
+        settled_nodes,
+        idle,
+        left_thumbs,
+        right_thumbs,
+        search_refreshed,
+    ) = painted;
+    let (active_list, active_rows, inactive_list, inactive_rows, active_change, inactive_change) =
+        match active {
+            PaneId::Left => (
+                left_list,
+                left_rows,
+                right_list,
+                right_rows,
+                left_change,
+                right_change,
+            ),
+            PaneId::Right => (
+                right_list,
+                right_rows,
+                left_list,
+                left_rows,
+                right_change,
+                left_change,
+            ),
+        };
+    paint(
+        active_list,
+        active_change,
+        if search_refreshed { shown } else { active_rows },
+    );
+    paint(inactive_list, inactive_change, inactive_rows);
     if search_refreshed {
-        set_count(list, shown);
+        set_count(active_list, shown);
     }
-    if thumb_ready {
-        redraw_visible(list);
+    if left_thumbs {
+        redraw_visible(left_list);
+    }
+    if right_thumbs {
+        redraw_visible(right_list);
     }
     poll_file_op(hwnd);
     poll_menu_host(hwnd);
@@ -1188,8 +1356,8 @@ fn drain_node(node: &mut FolderNode) -> ChildChange {
     expansion.apply_available(|| opened.poll())
 }
 
-fn drain(state: &mut ListWindow) -> RowChange {
-    let ListWindow { opened, rows, .. } = state;
+fn drain_pane(pane: &mut PaneView) -> RowChange {
+    let PaneView { opened, rows, .. } = pane;
     let Some(opened) = opened.as_mut() else {
         rows.stop();
         return RowChange::Unchanged;
@@ -1224,6 +1392,10 @@ fn on_notify(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     }
     let code = unsafe { (*(lparam as *const NMHDR)).code };
     match code {
+        NM_SETFOCUS => {
+            on_list_focus(hwnd, lparam);
+            0
+        }
         NM_CUSTOMDRAW => on_custom_draw(hwnd, lparam),
         LVN_GETDISPINFOW => {
             on_list_dispinfo(hwnd, lparam);
@@ -1255,8 +1427,9 @@ fn on_list_dispinfo(hwnd: HWND, lparam: LPARAM) {
     let index = item.iItem as usize;
     let buffer = item.pszText;
     let capacity = item.cchTextMax;
+    let list = info.hdr.hwndFrom;
     let row = state_mut(hwnd).and_then(|state| {
-        visible_entry(state, index).map(|entry| {
+        visible_entry(state, list, index).map(|entry| {
             let label = if wants_text {
                 columns::text(subitem, &entry)
             } else {
@@ -1287,18 +1460,25 @@ fn on_list_dispinfo(hwnd: HWND, lparam: LPARAM) {
 /// Size and Date modified for rows the list view is painting. Subitem 0 stays
 /// with the control so the extension icon is still drawn. The tree's custom
 /// draw is ignored. The label is copied before DirectWrite runs.
+fn on_list_focus(hwnd: HWND, lparam: LPARAM) {
+    let list = unsafe { (*(lparam as *const NMHDR)).hwndFrom };
+    let Some(id) = state_mut(hwnd).and_then(|state| pane_id_from_list(state, list)) else {
+        return;
+    };
+    activate_pane(hwnd, id);
+}
+
 fn on_custom_draw(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     let draw = unsafe { &*(lparam as *const NMLVCUSTOMDRAW) };
-    let Some(list) = list_handle(hwnd) else {
-        return CDRF_DODEFAULT as LRESULT;
-    };
-    if draw.nmcd.hdr.hwndFrom != list {
+    let list = draw.nmcd.hdr.hwndFrom;
+    let known = state_mut(hwnd).is_some_and(|state| pane_id_from_list(state, list).is_some());
+    if !known {
         return CDRF_DODEFAULT as LRESULT;
     }
     match draw.nmcd.dwDrawStage {
         CDDS_PREPAINT => CDRF_NOTIFYITEMDRAW as LRESULT,
         CDDS_ITEMPREPAINT => {
-            request_visible_thumb(hwnd, draw.nmcd.dwItemSpec);
+            request_visible_thumb(hwnd, list, draw.nmcd.dwItemSpec);
             CDRF_NOTIFYSUBITEMDRAW as LRESULT
         }
         stage if stage == (CDDS_ITEMPREPAINT | CDDS_SUBITEM) => paint_subitem(hwnd, list, draw),
@@ -1316,8 +1496,9 @@ fn paint_subitem(hwnd: HWND, list: HWND, draw: &NMLVCUSTOMDRAW) -> LRESULT {
         return CDRF_DODEFAULT as LRESULT;
     }
     let row = draw.nmcd.dwItemSpec;
-    let text = state_mut(hwnd)
-        .and_then(|state| visible_entry(state, row).map(|entry| columns::text(subitem, &entry)));
+    let text = state_mut(hwnd).and_then(|state| {
+        visible_entry(state, list, row).map(|entry| columns::text(subitem, &entry))
+    });
     let Some(text) = text.filter(|text| !text.is_empty()) else {
         return CDRF_DODEFAULT as LRESULT;
     };
@@ -1352,21 +1533,21 @@ fn cell_rect(rect: RECT) -> CellRect {
     }
 }
 
-fn cancel_thumbs(state: &mut ListWindow) {
-    for job in state.thumb_jobs.values() {
+fn cancel_pane_thumbs(pane: &mut PaneView) {
+    for job in pane.thumb_jobs.values() {
         job.ticket.cancel();
     }
-    state.thumb_jobs.clear();
+    pane.thumb_jobs.clear();
 }
 
-fn thumbs_pending(state: &ListWindow) -> bool {
-    state.thumb_jobs.values().any(|job| !job.settled)
+fn pane_thumbs_pending(pane: &PaneView) -> bool {
+    pane.thumb_jobs.values().any(|job| !job.settled)
 }
 
 /// `try_recv` never waits. A transition to Ready asks for one redraw.
-fn poll_thumbs(state: &mut ListWindow) -> bool {
+fn poll_pane_thumbs(pane: &mut PaneView) -> bool {
     let mut ready = false;
-    for job in state.thumb_jobs.values_mut() {
+    for job in pane.thumb_jobs.values_mut() {
         if job.settled {
             continue;
         }
@@ -1384,17 +1565,23 @@ fn poll_thumbs(state: &mut ListWindow) -> bool {
 
 /// Visible rows only: the list view sends item prepaint for those rows.
 /// `request` does not decode and does not sleep.
-fn request_visible_thumb(hwnd: HWND, row: usize) {
-    let Some(path) = state_mut(hwnd).and_then(|state| thumb_path(state, row)) else {
+fn request_visible_thumb(hwnd: HWND, list: HWND, row: usize) {
+    let Some(path) = state_mut(hwnd).and_then(|state| thumb_path(state, list, row)) else {
         return;
     };
     let pending = state_mut(hwnd).is_some_and(|state| {
-        if state.thumb_jobs.contains_key(&path) {
+        let Some(id) = pane_id_from_list(state, list) else {
+            return false;
+        };
+        let pane = pane_mut(state, id);
+        if pane.thumb_jobs.contains_key(&path) {
             return false;
         }
         let ticket = state.thumbs.request(&path);
         let settled = !matches!(ticket.try_recv(), TryThumb::Pending);
-        state.thumb_jobs.insert(path, ThumbJob { ticket, settled });
+        pane_mut(state, id)
+            .thumb_jobs
+            .insert(path, ThumbJob { ticket, settled });
         !settled
     });
     if pending {
@@ -1402,19 +1589,21 @@ fn request_visible_thumb(hwnd: HWND, row: usize) {
     }
 }
 
-fn thumb_path(state: &ListWindow, row: usize) -> Option<String> {
-    if state.query.is_active() {
+fn thumb_path(state: &ListWindow, list: HWND, row: usize) -> Option<String> {
+    let id = pane_id_from_list(state, list)?;
+    if state.query.is_active() && state.panes.active() == id {
         let hit = state.search_hits.get(row)?;
         if hit.is_directory || !images::wants_thumbnail(&hit.name) {
             return None;
         }
         return Some(hit.path.clone());
     }
-    let entry = state.rows.shown().get(row)?;
+    let pane = pane_ref(state, id);
+    let entry = pane.rows.shown().get(row)?;
     if entry.is_directory || !images::wants_thumbnail(&entry.name) {
         return None;
     }
-    Some(child_directory(&state.current, &entry.name))
+    Some(child_directory(&pane.current, &entry.name))
 }
 
 fn overlay_thumb(hwnd: HWND, list: HWND, draw: &NMLVCUSTOMDRAW) -> LRESULT {
@@ -1423,8 +1612,9 @@ fn overlay_thumb(hwnd: HWND, list: HWND, draw: &NMLVCUSTOMDRAW) -> LRESULT {
     }
     let row = draw.nmcd.dwItemSpec;
     let rgba = state_mut(hwnd).and_then(|state| {
-        let path = thumb_path(state, row)?;
-        match state.thumb_jobs.get(&path)?.ticket.try_recv() {
+        let path = thumb_path(state, list, row)?;
+        let id = pane_id_from_list(state, list)?;
+        match pane_ref(state, id).thumb_jobs.get(&path)?.ticket.try_recv() {
             TryThumb::Ready(rgba) => Some(rgba),
             _ => None,
         }
@@ -1563,6 +1753,10 @@ fn on_item_activate(hwnd: HWND, lparam: LPARAM) {
     if info.iItem < 0 {
         return;
     }
+    if let Some(id) = state_mut(hwnd).and_then(|state| pane_id_from_list(state, info.hdr.hwndFrom))
+    {
+        activate_pane(hwnd, id);
+    }
     let Some(path) = activated_directory(hwnd, info.iItem as usize) else {
         return;
     };
@@ -1571,15 +1765,17 @@ fn on_item_activate(hwnd: HWND, lparam: LPARAM) {
 
 fn activated_directory(hwnd: HWND, index: usize) -> Option<String> {
     let state = state_mut(hwnd)?;
+    let id = state.panes.active();
     if state.query.is_active() {
         let hit = state.search_hits.get(index)?;
         return hit.is_directory.then(|| hit.path.clone());
     }
-    let entry = state.rows.shown().get(index)?;
+    let pane = pane_ref(state, id);
+    let entry = pane.rows.shown().get(index)?;
     if !entry.is_directory || entry.name.is_empty() {
         return None;
     }
-    Some(child_directory(&state.current, &entry.name))
+    Some(child_directory(&pane.current, &entry.name))
 }
 
 fn on_selection(hwnd: HWND, lparam: LPARAM) -> LRESULT {
@@ -1597,7 +1793,9 @@ fn on_selection(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     let Some(path) = navigable_path(hwnd, index) else {
         return 0;
     };
-    if state_mut(hwnd).is_some_and(|state| same_directory(&state.current, &path)) {
+    if state_mut(hwnd)
+        .is_some_and(|state| same_directory(&pane_ref(state, state.panes.active()).current, &path))
+    {
         return 0;
     }
     request_navigation(hwnd, path, NavKind::Push);
@@ -2007,19 +2205,21 @@ fn tree_handle(hwnd: HWND) -> Option<HWND> {
 }
 
 fn fit_panes(hwnd: HWND) {
-    let Some(list) = list_handle(hwnd) else {
-        return;
-    };
-    let Some((tree, back, forward, address, timeout, search)) = state_mut(hwnd).map(|state| {
-        (
-            state.tree,
-            state.back,
-            state.forward,
-            state.address,
-            state.timeout,
-            state.search,
-        )
-    }) else {
+    let Some((tree, back, forward, address, timeout, search, other, left, right)) = state_mut(hwnd)
+        .map(|state| {
+            (
+                state.tree,
+                state.back,
+                state.forward,
+                state.address,
+                state.timeout,
+                state.search,
+                state.other,
+                state.left.list,
+                state.right.list,
+            )
+        })
+    else {
         return;
     };
     let mut rect = RECT {
@@ -2035,7 +2235,9 @@ fn fit_panes(hwnd: HWND) {
         MoveWindow(back, 0, 0, BACK_WIDTH, NAV_HEIGHT, 1);
         let forward_x = BACK_WIDTH + NAV_GAP;
         MoveWindow(forward, forward_x, 0, FORWARD_WIDTH, NAV_HEIGHT, 1);
-        let address_x = forward_x + FORWARD_WIDTH + NAV_GAP;
+        let other_x = forward_x + FORWARD_WIDTH + NAV_GAP;
+        MoveWindow(other, other_x, 0, OTHER_WIDTH, NAV_HEIGHT, 1);
+        let address_x = other_x + OTHER_WIDTH + NAV_GAP;
         let timeout_x = (width - TIMEOUT_WIDTH).max(address_x);
         let search_x = (timeout_x - NAV_GAP - SEARCH_WIDTH).max(address_x);
         MoveWindow(search, search_x, 0, SEARCH_WIDTH, NAV_HEIGHT, 1);
@@ -2045,11 +2247,28 @@ fn fit_panes(hwnd: HWND) {
         let top = NAV_HEIGHT + NAV_GAP;
         let body = (height - top).max(0);
         let tree_width = TREE_WIDTH.min(width.max(0));
-        let list_width = (width - tree_width).max(0);
+        let lists = (width - tree_width - NAV_GAP).max(0);
+        let left_width = lists / 2;
+        let right_width = lists - left_width;
         MoveWindow(tree, 0, top, tree_width, body, 1);
-        MoveWindow(list, tree_width, top, list_width, body, 1);
-        let fixed = columns::SIZE_WIDTH + columns::MODIFIED_WIDTH;
-        let name_width = (list_width - fixed).max(80);
+        MoveWindow(left, tree_width, top, left_width, body, 1);
+        MoveWindow(
+            right,
+            tree_width + left_width + NAV_GAP,
+            top,
+            right_width,
+            body,
+            1,
+        );
+        size_columns(left, left_width);
+        size_columns(right, right_width);
+    }
+}
+
+fn size_columns(list: HWND, list_width: i32) {
+    let fixed = columns::SIZE_WIDTH + columns::MODIFIED_WIDTH;
+    let name_width = (list_width - fixed).max(80);
+    unsafe {
         SendMessageW(
             list,
             LVM_SETCOLUMNWIDTH,
@@ -2072,12 +2291,11 @@ fn fit_panes(hwnd: HWND) {
 }
 
 fn on_context_menu(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
-    let Some(list) = list_handle(hwnd) else {
+    let list = wparam as HWND;
+    let Some(id) = state_mut(hwnd).and_then(|state| pane_id_from_list(state, list)) else {
         return;
     };
-    if wparam as HWND != list {
-        return;
-    }
+    activate_pane(hwnd, id);
     let point = context_point(lparam);
     select_at(list, point);
     let selected = selected_count(list);
@@ -2201,8 +2419,9 @@ fn selected_paths(hwnd: HWND) -> Vec<String> {
                     if state.query.is_active() {
                         return Some(state.search_hits.get(index)?.path.clone());
                     }
-                    let name = state.rows.shown().get(index)?.name.clone();
-                    Some(child_directory(&state.current, &name))
+                    let pane = pane_ref(state, state.panes.active());
+                    let name = pane.rows.shown().get(index)?.name.clone();
+                    Some(child_directory(&pane.current, &name))
                 })
                 .collect()
         })
@@ -2285,7 +2504,9 @@ fn paste_into(hwnd: HWND) {
     let Some(paste) = file_ops::paste_request() else {
         return;
     };
-    let Some(dest) = state_mut(hwnd).map(|state| state.current.clone()) else {
+    let Some(dest) =
+        state_mut(hwnd).map(|state| pane_ref(state, state.panes.active()).current.clone())
+    else {
         return;
     };
     let op = if paste.cut {
@@ -2325,7 +2546,9 @@ fn delete_selection(hwnd: HWND) {
     if answer != IDYES {
         return;
     }
-    let Some(directory) = state_mut(hwnd).map(|state| state.current.clone()) else {
+    let Some(directory) =
+        state_mut(hwnd).map(|state| pane_ref(state, state.panes.active()).current.clone())
+    else {
         return;
     };
     begin_file_op(hwnd, Op::Delete { paths }, directory);
@@ -2362,12 +2585,15 @@ fn on_end_label_edit(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     if state_mut(hwnd).is_some_and(|state| state.query.is_active()) {
         return 0;
     }
+    let list = info.hdr.hwndFrom;
     let rename = state_mut(hwnd).and_then(|state| {
-        let entry = state.rows.shown().get(item.iItem as usize)?;
+        let id = pane_id_from_list(state, list)?;
+        let pane = pane_ref(state, id);
+        let entry = pane.rows.shown().get(item.iItem as usize)?;
         let accepted = commands::accepted_rename(&entry.name, &new_name)?;
-        let from = child_directory(&state.current, &entry.name);
-        let to = child_directory(&state.current, &accepted);
-        let directory = state.current.clone();
+        let from = child_directory(&pane.current, &entry.name);
+        let to = child_directory(&pane.current, &accepted);
+        let directory = pane.current.clone();
         Some((from, to, directory))
     });
     if let Some((from, to, directory)) = rename {
@@ -2420,7 +2646,9 @@ fn begin_menu_host(hwnd: HWND) {
     if menu_host_pending_hwnd(hwnd) {
         return;
     }
-    let Some(directory) = state_mut(hwnd).map(|state| state.current.clone()) else {
+    let Some(directory) =
+        state_mut(hwnd).map(|state| pane_ref(state, state.panes.active()).current.clone())
+    else {
         return;
     };
     let paths = selected_paths(hwnd);
@@ -2457,7 +2685,8 @@ fn poll_menu_host(hwnd: HWND) {
     if let Some(state) = state_mut(hwnd) {
         state.menu_host = None;
     }
-    let same = state_mut(hwnd).is_some_and(|state| state.current == directory);
+    let same = state_mut(hwnd)
+        .is_some_and(|state| pane_ref(state, state.panes.active()).current == directory);
     if same && verbs.iter().any(|label| !label.is_empty()) {
         show_helper_verbs(hwnd, &verbs);
     }
@@ -2505,10 +2734,30 @@ fn poll_file_op(hwnd: HWND) {
     if let Some(state) = state_mut(hwnd) {
         state.file_op = None;
     }
-    let same = state_mut(hwnd).is_some_and(|state| state.current == directory);
-    if ok && same {
-        request_navigation(hwnd, directory, NavKind::Refresh);
+    if ok {
+        refresh_directory(hwnd, directory);
     }
+}
+
+fn refresh_directory(hwnd: HWND, directory: String) {
+    let Some(id) = state_mut(hwnd).and_then(|state| {
+        if state.left.current == directory {
+            Some(PaneId::Left)
+        } else if state.right.current == directory {
+            Some(PaneId::Right)
+        } else {
+            None
+        }
+    }) else {
+        return;
+    };
+    if let Some(state) = state_mut(hwnd) {
+        pane_mut(state, id).pending = Some(PendingNav {
+            path: directory,
+            kind: NavKind::Refresh,
+        });
+    }
+    try_pending(hwnd);
 }
 
 fn on_destroy(hwnd: HWND) {
@@ -2516,11 +2765,18 @@ fn on_destroy(hwnd: HWND) {
     if !raw.is_null() {
         unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
         let mut state = unsafe { Box::from_raw(raw) };
-        cancel_thumbs(&mut state);
+        unsafe {
+            SendMessageW(state.right.list, LVM_SETIMAGELIST, LVSIL_SMALL as WPARAM, 0);
+        }
+        cancel_pane_thumbs(&mut state.left);
+        cancel_pane_thumbs(&mut state.right);
         if state.polling {
             unsafe { KillTimer(hwnd, TIMER_ID) };
         }
-        if let Some(opened) = &state.opened {
+        if let Some(opened) = &state.left.opened {
+            opened.cancel();
+        }
+        if let Some(opened) = &state.right.opened {
             opened.cancel();
         }
         for node in &state.nodes {
@@ -2537,7 +2793,99 @@ fn on_destroy(hwnd: HWND) {
 }
 
 fn list_handle(hwnd: HWND) -> Option<HWND> {
-    state_mut(hwnd).map(|state| state.list)
+    state_mut(hwnd).map(|state| pane_ref(state, state.panes.active()).list)
+}
+
+fn pane_mut(state: &mut ListWindow, id: PaneId) -> &mut PaneView {
+    match id {
+        PaneId::Left => &mut state.left,
+        PaneId::Right => &mut state.right,
+    }
+}
+
+fn pane_ref(state: &ListWindow, id: PaneId) -> &PaneView {
+    match id {
+        PaneId::Left => &state.left,
+        PaneId::Right => &state.right,
+    }
+}
+
+fn pane_id_from_list(state: &ListWindow, list: HWND) -> Option<PaneId> {
+    if state.left.list == list {
+        Some(PaneId::Left)
+    } else if state.right.list == list {
+        Some(PaneId::Right)
+    } else {
+        None
+    }
+}
+
+/// Focus `id` without changing either path or opening a listing.
+fn activate_pane(hwnd: HWND, id: PaneId) {
+    let switched = state_mut(hwnd).is_some_and(|state| {
+        if state.panes.active() == id {
+            return false;
+        }
+        state.panes.activate(id);
+        true
+    });
+    if switched {
+        show_active_pane(hwnd);
+    }
+}
+
+fn toggle_pane(hwnd: HWND) {
+    let Some(destination) = state_mut(hwnd).map(|state| {
+        let destination = state.panes.other_path().to_string();
+        state.panes.toggle();
+        destination
+    }) else {
+        return;
+    };
+    show_active_pane(hwnd);
+    if let Some(state) = state_mut(hwnd) {
+        debug_assert_eq!(state.panes.active_path(), destination);
+    }
+    if let Some(list) = list_handle(hwnd) {
+        unsafe { SetFocus(list) };
+    }
+}
+
+/// Point the address bar at the active pane and show search rows only there.
+fn show_active_pane(hwnd: HWND) {
+    let inactive = state_mut(hwnd).map(|state| match state.panes.active() {
+        PaneId::Left => PaneId::Right,
+        PaneId::Right => PaneId::Left,
+    });
+    let Some(inactive) = inactive else {
+        return;
+    };
+    let Some((path, address, active_list, inactive_list, active_count, inactive_count)) =
+        state_mut(hwnd).map(|state| {
+            let path = state.panes.active_path().to_string();
+            let address = state.address;
+            let active = state.panes.active();
+            let active_list = pane_ref(state, active).list;
+            let inactive_list = pane_ref(state, inactive).list;
+            let inactive_count = pane_ref(state, inactive).rows.shown().len();
+            let active_count = visible_len(state);
+            (
+                path,
+                address,
+                active_list,
+                inactive_list,
+                active_count,
+                inactive_count,
+            )
+        })
+    else {
+        return;
+    };
+    set_control_text(address, &path);
+    set_caption(hwnd, &path);
+    set_count(active_list, active_count);
+    set_count(inactive_list, inactive_count);
+    update_nav_buttons(hwnd);
 }
 
 fn state_mut(hwnd: HWND) -> Option<&'static mut ListWindow> {
