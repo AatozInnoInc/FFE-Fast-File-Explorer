@@ -9,14 +9,16 @@
 //! The Name column stays with the list view so the icon remains. An image in a
 //! visible row requests a thumbnail on the background pool, and that buffer
 //! covers the icon once it is ready. The list's context menu copies, cuts,
-//! pastes, renames, deletes, and opens properties. More options does not load
-//! a shell extension in this process. A Network node stays collapsed until the
-//! user expands it.
+//! pastes, renames, deletes, and opens properties. More options asks a helper
+//! process supervised by the watchdog. That helper returns no verbs and does
+//! not load a shell extension. A Network node stays collapsed until the user
+//! expands it.
 
 use std::collections::HashMap;
 use std::mem;
 use std::process::ExitCode;
 use std::ptr;
+use std::time::Instant;
 
 use windows_sys::core::w;
 use windows_sys::Win32::Foundation::{
@@ -66,6 +68,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
 
+use fx_core::helper::HelperSession;
 use fx_core::thumbs::{ThumbCache, ThumbTicket, TryThumb};
 use fx_core::{EnumError, NetworkBrowse, NetworkPlace, OpenedDirectory, Path, Shell, VolumeId};
 
@@ -129,6 +132,8 @@ struct ListWindow {
     thumb_jobs: HashMap<String, ThumbJob>,
     /// Paste, delete, or rename running off this thread. At most one.
     file_op: Option<FileOp>,
+    /// More options helper. At most one. Drop kills it and does not join.
+    menu_host: Option<HelperSession>,
 }
 
 struct ThumbJob {
@@ -392,6 +397,7 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
         thumbs: ThumbCache::with_decoder(images::decode_image),
         thumb_jobs: HashMap::new(),
         file_op: None,
+        menu_host: None,
     });
     let shown = state.rows.shown().len();
     unsafe {
@@ -863,6 +869,7 @@ fn on_timer(hwnd: HWND) {
             && state.rows.is_settled()
             && !thumbs_pending(state)
             && !file_op_pending(state)
+            && !menu_host_pending(state)
             && state
                 .nodes
                 .iter()
@@ -881,6 +888,7 @@ fn on_timer(hwnd: HWND) {
         redraw_visible(list);
     }
     poll_file_op(hwnd);
+    poll_menu_host(hwnd);
     for (index, child_change) in tree_changes {
         match child_change {
             NodeChange::Directories(change) => apply_children(hwnd, index, change),
@@ -2035,7 +2043,7 @@ fn run_command(hwnd: HWND, command: Command) {
         Command::Rename => begin_rename(hwnd),
         Command::Delete => delete_selection(hwnd),
         Command::Properties => properties_selection(hwnd),
-        Command::MoreOptions => {}
+        Command::MoreOptions => begin_menu_host(hwnd),
     }
 }
 
@@ -2171,6 +2179,83 @@ fn file_op_pending(state: &ListWindow) -> bool {
 
 fn file_op_pending_hwnd(hwnd: HWND) -> bool {
     state_mut(hwnd).is_some_and(|state| file_op_pending(state))
+}
+
+fn begin_menu_host(hwnd: HWND) {
+    if menu_host_pending_hwnd(hwnd) {
+        return;
+    }
+    let Some(directory) = state_mut(hwnd).map(|state| state.current.clone()) else {
+        return;
+    };
+    let paths = selected_paths(hwnd);
+    let Some(session) = HelperSession::beside_exe(&directory, &paths) else {
+        return;
+    };
+    if let Some(state) = state_mut(hwnd) {
+        state.menu_host = Some(session);
+    }
+    ensure_timer(hwnd);
+}
+
+fn menu_host_pending(state: &ListWindow) -> bool {
+    state
+        .menu_host
+        .as_ref()
+        .is_some_and(|host| host.try_recv().is_none())
+}
+
+fn menu_host_pending_hwnd(hwnd: HWND) -> bool {
+    state_mut(hwnd).is_some_and(|state| menu_host_pending(state))
+}
+
+fn poll_menu_host(hwnd: HWND) {
+    let outcome = state_mut(hwnd).and_then(|state| {
+        let host = state.menu_host.as_ref()?;
+        host.supervise(Instant::now());
+        let verbs = host.try_recv()?;
+        Some((verbs, host.directory().to_string()))
+    });
+    let Some((verbs, directory)) = outcome else {
+        return;
+    };
+    if let Some(state) = state_mut(hwnd) {
+        state.menu_host = None;
+    }
+    let same = state_mut(hwnd).is_some_and(|state| state.current == directory);
+    if same && verbs.iter().any(|label| !label.is_empty()) {
+        show_helper_verbs(hwnd, &verbs);
+    }
+}
+
+/// A second menu for labels the helper returned. The choice is not invoked in
+/// this process. This helper returns no labels, so the native menu stands.
+fn show_helper_verbs(hwnd: HWND, verbs: &[String]) {
+    let menu = unsafe { CreatePopupMenu() };
+    if menu.is_null() {
+        return;
+    }
+    for (index, label) in verbs.iter().enumerate() {
+        if label.is_empty() {
+            continue;
+        }
+        let text = wide(label);
+        unsafe { AppendMenuW(menu, MF_STRING, 100 + index, text.as_ptr()) };
+    }
+    let mut point = POINT { x: 0, y: 0 };
+    unsafe {
+        GetCursorPos(&mut point);
+        TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON,
+            point.x,
+            point.y,
+            0,
+            hwnd,
+            ptr::null(),
+        );
+        DestroyMenu(menu);
+    }
 }
 
 fn poll_file_op(hwnd: HWND) {
