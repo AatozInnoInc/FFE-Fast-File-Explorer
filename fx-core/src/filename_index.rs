@@ -67,6 +67,17 @@ impl FilenameIndex {
     /// Apply journal events in iterator order. A later event wins for the same path.
     ///
     /// This does not read the disk.
+    /// Records whose names match `query`, best match first.
+    ///
+    /// Ties keep path order. An empty query matches nothing. The score is
+    /// match quality only. Frecency is not applied. This does not read the disk
+    /// and does not search outside the records already stored.
+    pub fn search(&self, query: &str) -> Vec<&IndexRecord> {
+        let mut records: Vec<&IndexRecord> = self.records.values().collect();
+        records.sort_by(|left, right| left.path.cmp(&right.path));
+        crate::rank::rank_by(query, records, |record| record.name.as_str())
+    }
+
     pub fn apply_journal(&mut self, records: impl IntoIterator<Item = JournalEvent>) {
         for event in records {
             match event {
@@ -164,5 +175,42 @@ mod tests {
             Some(3)
         );
         assert!(index.get("C:\\missing.txt").is_none());
+    }
+
+    #[test]
+    fn search_ranks_match_quality_and_skips_an_empty_query() {
+        let mut index = FilenameIndex::new();
+        index.upsert(record("C:\\data\\zzreport.txt", "zzreport.txt", 1));
+        index.upsert(record("C:\\data\\report.txt", "report.txt", 2));
+        index.upsert(record("C:\\data\\r_e_port.txt", "r_e_port.txt", 3));
+        index.upsert(record("C:\\other\\notes.txt", "notes.txt", 4));
+
+        assert!(index.search("").is_empty());
+        let found: Vec<&str> = index
+            .search("report")
+            .into_iter()
+            .map(|record| record.path.as_str())
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                "C:\\data\\report.txt",
+                "C:\\data\\zzreport.txt",
+                "C:\\data\\r_e_port.txt",
+            ]
+        );
+    }
+
+    #[test]
+    fn equal_names_keep_path_order() {
+        let mut index = FilenameIndex::new();
+        index.upsert(record("C:\\b\\notes.txt", "notes.txt", 1));
+        index.upsert(record("C:\\a\\notes.txt", "notes.txt", 1));
+        let found: Vec<&str> = index
+            .search("notes")
+            .into_iter()
+            .map(|record| record.path.as_str())
+            .collect();
+        assert_eq!(found, vec!["C:\\a\\notes.txt", "C:\\b\\notes.txt"]);
     }
 }
