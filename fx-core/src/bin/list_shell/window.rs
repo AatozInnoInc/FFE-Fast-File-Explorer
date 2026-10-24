@@ -18,7 +18,9 @@
 //! empty or whitespace query leaves the directory listing in place. Names
 //! that later disappear stay indexed. The left and right lists start at the
 //! same path. Left is active. Switching panes changes focus and leaves both
-//! paths as they are. A Network node stays collapsed until the user expands it.
+//! paths as they are. Each pane has its own tabs. A new tab remembers that
+//! pane's path, and choosing a tab lists that path in that pane only. A
+//! Network node stays collapsed until the user expands it.
 
 use std::collections::HashMap;
 use std::mem;
@@ -47,15 +49,16 @@ use windows_sys::Win32::UI::Controls::{
     LVM_SETITEMSTATE, LVNI_SELECTED, LVN_ENDLABELEDITW, LVN_GETDISPINFOW, LVN_ITEMACTIVATE,
     LVSICF_NOSCROLL, LVSIL_SMALL, LVS_EDITLABELS, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
     LVS_NOSORTHEADER, LVS_OWNERDATA, LVS_REPORT, LVS_SHOWSELALWAYS, NMHDR, NMLISTVIEW,
-    NMLVCUSTOMDRAW, NMLVDISPINFOW, NMTREEVIEWW, NM_CUSTOMDRAW, TVE_COLLAPSE, TVE_EXPAND,
-    TVGN_CARET, TVIF_CHILDREN, TVIF_HANDLE, TVIF_PARAM, TVIF_TEXT, TVINSERTSTRUCTW,
+    NMLVCUSTOMDRAW, NMLVDISPINFOW, NMTREEVIEWW, NM_CUSTOMDRAW, TCM_GETCURSEL, TVE_COLLAPSE,
+    TVE_EXPAND, TVGN_CARET, TVIF_CHILDREN, TVIF_HANDLE, TVIF_PARAM, TVIF_TEXT, TVINSERTSTRUCTW,
     TVINSERTSTRUCTW_0, TVITEMW, TVI_LAST, TVI_ROOT, TVM_DELETEITEM, TVM_INSERTITEMW,
     TVM_SELECTITEM, TVM_SETITEMW, TVN_ITEMEXPANDINGW, TVN_SELCHANGEDW, TVS_DISABLEDRAGDROP,
     TVS_HASBUTTONS, TVS_HASLINES, TVS_LINESATROOT, TVS_SHOWSELALWAYS, WC_BUTTONW, WC_EDITW,
     WC_LISTVIEWW, WC_TREEVIEWW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    EnableWindow, GetFocus, SetFocus, VK_F6, VK_LEFT, VK_RETURN, VK_RIGHT,
+    EnableWindow, GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_F6, VK_LEFT, VK_MENU, VK_RETURN,
+    VK_RIGHT, VK_SHIFT, VK_T, VK_TAB, VK_W,
 };
 use windows_sys::Win32::UI::Shell::{
     SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_SMALLICON, SHGFI_USEFILEATTRIBUTES,
@@ -93,6 +96,8 @@ use crate::panes::{PaneId, Panes};
 use crate::places::{PlaceChange, PlaceList};
 use crate::query::Query;
 use crate::rows::{DirectoryRows, RowChange};
+use crate::tab_strip;
+use crate::tabs::PaneTabs;
 use crate::timeout;
 use crate::tree::{child_directory, ChildChange, Expansion};
 
@@ -115,6 +120,8 @@ const ID_ADDRESS: isize = 5;
 const ID_TIMEOUT: isize = 6;
 const ID_SEARCH: isize = 7;
 const ID_OTHER: isize = 9;
+/// `TCN_SELCHANGE`. The tab strip sends this after the selection moves.
+const TCN_SELCHANGE: u32 = 0xFFFF_FDD9;
 /// Width of the search box. Not a performance budget.
 const SEARCH_WIDTH: i32 = 180;
 /// Width of the button that switches the active pane. Not a performance budget.
@@ -186,6 +193,10 @@ struct PaneView {
     thumb_jobs: HashMap<String, ThumbJob>,
     /// Last directory copied from this pane into the window index.
     indexed_path: String,
+    /// Paths remembered by this pane's tabs. One list, not a third pane.
+    tabs: PaneTabs,
+    /// Tab strip above this pane's list.
+    tab_strip: HWND,
 }
 
 struct ThumbJob {
@@ -376,7 +387,7 @@ impl WindowStart {
 fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
     let controls = INITCOMMONCONTROLSEX {
         dwSize: mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
-        dwICC: ICC_LISTVIEW_CLASSES | ICC_TREEVIEW_CLASSES,
+        dwICC: ICC_LISTVIEW_CLASSES | ICC_TREEVIEW_CLASSES | tab_strip::TAB_CLASSES,
     };
     let _ = unsafe { InitCommonControlsEx(&controls) };
 
@@ -452,6 +463,8 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
         ID_SEARCH,
         "search box",
     )?;
+    let left_tabs = tab_strip::create(hwnd, tab_strip::ID_TABS_LEFT)?;
+    let right_tabs = tab_strip::create(hwnd, tab_strip::ID_TABS_RIGHT)?;
     let cue = wide("Search");
     unsafe {
         SendMessageW(search, EM_SETCUEBANNER, 1, cue.as_ptr() as LPARAM);
@@ -473,6 +486,8 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
             rows: start.rows,
             thumb_jobs: HashMap::new(),
             indexed_path: String::new(),
+            tabs: PaneTabs::start(root.clone()),
+            tab_strip: left_tabs,
         },
         right: PaneView {
             list: right_list,
@@ -486,6 +501,8 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
             rows: right_rows,
             thumb_jobs: HashMap::new(),
             indexed_path: String::new(),
+            tabs: PaneTabs::start(root.clone()),
+            tab_strip: right_tabs,
         },
         tree,
         back,
@@ -515,6 +532,8 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
     }
     insert_root(hwnd, &root);
     insert_network(hwnd);
+    refill_tabs(hwnd, PaneId::Left);
+    refill_tabs(hwnd, PaneId::Right);
     update_nav_buttons(hwnd);
 
     fit_panes(hwnd);
@@ -714,6 +733,21 @@ fn intercept(message: &MSG) -> bool {
             toggle_pane(root);
             true
         }
+        WM_KEYDOWN if key_down(VK_CONTROL) && !key_down(VK_MENU) => match message.wParam as u16 {
+            VK_T if !key_repeat(message.lParam) => {
+                new_active_tab(root);
+                true
+            }
+            VK_W if !key_repeat(message.lParam) => {
+                close_active_tab(root);
+                true
+            }
+            VK_TAB => {
+                cycle_active_tab(root, key_down(VK_SHIFT));
+                true
+            }
+            _ => false,
+        },
         WM_KEYDOWN if message.wParam == VK_RETURN as WPARAM && is_address(root, message.hwnd) => {
             submit_address(root);
             true
@@ -988,6 +1022,7 @@ fn try_pane_pending(hwnd: HWND, id: PaneId) {
                 pane.pending = None;
                 commit_history(pane, &pending);
             }
+            refill_tabs(hwnd, id);
             present_directory(hwnd, id, &pending.path, opened);
             if state_mut(hwnd).is_some_and(|state| state.panes.active() == id) {
                 follow_tree(hwnd, &pending.path);
@@ -1016,6 +1051,7 @@ fn commit_history(pane: &mut PaneView, pending: &PendingNav) {
         }
         NavKind::Refresh => {}
     }
+    pane.tabs.set_active_path(&pending.path);
 }
 
 fn present_directory(hwnd: HWND, id: PaneId, path: &str, mut opened: OpenedDirectory) {
@@ -1507,6 +1543,10 @@ fn on_notify(hwnd: HWND, lparam: LPARAM) -> LRESULT {
         }
         TVN_ITEMEXPANDINGW => on_item_expanding(hwnd, lparam),
         TVN_SELCHANGEDW => on_selection(hwnd, lparam),
+        TCN_SELCHANGE => {
+            on_tab_change(hwnd, lparam);
+            0
+        }
         _ => 0,
     }
 }
@@ -2336,20 +2376,33 @@ fn tree_handle(hwnd: HWND) -> Option<HWND> {
 }
 
 fn fit_panes(hwnd: HWND) {
-    let Some((tree, back, forward, address, timeout, search, other, left, right)) = state_mut(hwnd)
-        .map(|state| {
-            (
-                state.tree,
-                state.back,
-                state.forward,
-                state.address,
-                state.timeout,
-                state.search,
-                state.other,
-                state.left.list,
-                state.right.list,
-            )
-        })
+    let Some((
+        tree,
+        back,
+        forward,
+        address,
+        timeout,
+        search,
+        other,
+        left,
+        right,
+        left_tabs,
+        right_tabs,
+    )) = state_mut(hwnd).map(|state| {
+        (
+            state.tree,
+            state.back,
+            state.forward,
+            state.address,
+            state.timeout,
+            state.search,
+            state.other,
+            state.left.list,
+            state.right.list,
+            state.left.tab_strip,
+            state.right.tab_strip,
+        )
+    })
     else {
         return;
     };
@@ -2381,16 +2434,15 @@ fn fit_panes(hwnd: HWND) {
         let lists = (width - tree_width - NAV_GAP).max(0);
         let left_width = lists / 2;
         let right_width = lists - left_width;
+        let tab_height = tab_strip::TAB_HEIGHT;
+        let list_top = top + tab_height;
+        let list_body = (body - tab_height).max(0);
         MoveWindow(tree, 0, top, tree_width, body, 1);
-        MoveWindow(left, tree_width, top, left_width, body, 1);
-        MoveWindow(
-            right,
-            tree_width + left_width + NAV_GAP,
-            top,
-            right_width,
-            body,
-            1,
-        );
+        MoveWindow(left_tabs, tree_width, top, left_width, tab_height, 1);
+        MoveWindow(left, tree_width, list_top, left_width, list_body, 1);
+        let right_x = tree_width + left_width + NAV_GAP;
+        MoveWindow(right_tabs, right_x, top, right_width, tab_height, 1);
+        MoveWindow(right, right_x, list_top, right_width, list_body, 1);
         size_columns(left, left_width);
         size_columns(right, right_width);
     }
@@ -2972,6 +3024,111 @@ fn pane_id_from_list(state: &ListWindow, list: HWND) -> Option<PaneId> {
     } else {
         None
     }
+}
+
+fn key_down(vk: u16) -> bool {
+    unsafe { GetKeyState(i32::from(vk)) < 0 }
+}
+
+fn key_repeat(lparam: LPARAM) -> bool {
+    lparam & (1 << 30) != 0
+}
+
+fn refill_tabs(hwnd: HWND, id: PaneId) {
+    let Some((strip, titles, active)) = state_mut(hwnd).map(|state| {
+        let pane = pane_ref(state, id);
+        let titles = pane
+            .tabs
+            .paths()
+            .iter()
+            .map(|path| PaneTabs::title(path))
+            .collect::<Vec<_>>();
+        (pane.tab_strip, titles, pane.tabs.active_index())
+    }) else {
+        return;
+    };
+    tab_strip::refill(strip, &titles, active);
+}
+
+fn new_active_tab(hwnd: HWND) {
+    let Some(id) = state_mut(hwnd).map(|state| state.panes.active()) else {
+        return;
+    };
+    if let Some(state) = state_mut(hwnd) {
+        let _ = pane_mut(state, id).tabs.new_tab();
+    }
+    refill_tabs(hwnd, id);
+}
+
+fn close_active_tab(hwnd: HWND) {
+    let Some(id) = state_mut(hwnd).map(|state| state.panes.active()) else {
+        return;
+    };
+    let Some(path) = state_mut(hwnd)
+        .and_then(|state| pane_mut(state, id).tabs.close_active().map(str::to_string))
+    else {
+        return;
+    };
+    refill_tabs(hwnd, id);
+    let current = state_mut(hwnd).map(|state| pane_ref(state, id).current.clone());
+    if current.as_deref() != Some(path.as_str()) {
+        request_navigation(hwnd, path, NavKind::Push);
+    }
+}
+
+fn cycle_active_tab(hwnd: HWND, backward: bool) {
+    let Some(id) = state_mut(hwnd).map(|state| state.panes.active()) else {
+        return;
+    };
+    let Some(index) = state_mut(hwnd).map(|state| {
+        let tabs = &pane_ref(state, id).tabs;
+        let len = tabs.len();
+        if len == 0 {
+            return 0;
+        }
+        let active = tabs.active_index();
+        if backward {
+            if active == 0 {
+                len - 1
+            } else {
+                active - 1
+            }
+        } else {
+            (active + 1) % len
+        }
+    }) else {
+        return;
+    };
+    choose_tab(hwnd, id, index);
+}
+
+fn choose_tab(hwnd: HWND, id: PaneId, index: usize) {
+    let Some(path) = state_mut(hwnd)
+        .and_then(|state| pane_mut(state, id).tabs.select(index).map(str::to_string))
+    else {
+        return;
+    };
+    refill_tabs(hwnd, id);
+    activate_pane(hwnd, id);
+    request_navigation(hwnd, path, NavKind::Push);
+}
+
+fn on_tab_change(hwnd: HWND, lparam: LPARAM) {
+    let header = unsafe { &*(lparam as *const NMHDR) };
+    let Some(id) = tab_strip::pane_for(header.idFrom as isize) else {
+        return;
+    };
+    let index = unsafe { SendMessageW(header.hwndFrom, TCM_GETCURSEL, 0, 0) };
+    if index < 0 {
+        return;
+    }
+    let index = index as usize;
+    let already =
+        state_mut(hwnd).is_some_and(|state| pane_ref(state, id).tabs.active_index() == index);
+    if already {
+        return;
+    }
+    choose_tab(hwnd, id, index);
 }
 
 /// Focus `id` without changing either path or opening a listing.

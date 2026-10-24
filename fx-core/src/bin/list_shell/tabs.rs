@@ -25,6 +25,13 @@ impl PaneTabs {
         &self.paths[self.active]
     }
 
+    /// Replace the active tab's path. The active index does not change.
+    pub fn set_active_path(&mut self, path: &str) {
+        if let Some(slot) = self.paths.get_mut(self.active) {
+            *slot = path.to_string();
+        }
+    }
+
     pub fn active_index(&self) -> usize {
         self.active
     }
@@ -131,6 +138,20 @@ mod tests {
         assert_eq!(tabs.active_index(), 0);
         assert_eq!(tabs.active_path(), "C:\\docs");
         assert_eq!(tabs.paths(), ["C:\\docs".to_string()]);
+    }
+
+    #[test]
+    fn set_active_path_replaces_only_the_active_tab() {
+        let mut tabs = PaneTabs::start("C:\\a");
+        tabs.new_tab();
+        tabs.paths[1] = "C:\\b".to_string();
+        tabs.set_active_path("C:\\c");
+        assert_eq!(tabs.paths(), ["C:\\a".to_string(), "C:\\c".to_string()]);
+        assert_eq!(tabs.active_index(), 1);
+        assert_eq!(tabs.select(0), Some("C:\\a"));
+        tabs.set_active_path("C:\\d");
+        assert_eq!(tabs.active_path(), "C:\\d");
+        assert_eq!(tabs.paths()[1], "C:\\c");
     }
 
     #[test]
