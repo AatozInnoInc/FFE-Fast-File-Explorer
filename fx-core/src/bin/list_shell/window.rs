@@ -854,7 +854,7 @@ fn visible_len(state: &ListWindow) -> usize {
 
 fn visible_entry(state: &ListWindow, list: HWND, index: usize) -> Option<fx_core::FileEntry> {
     let id = pane_id_from_list(state, list)?;
-    if state.query.is_active() && state.panes.active() == id {
+    if list_shows_search(state.query.is_active(), state.panes.active() == id) {
         state.search_hits.get(index).map(file_entry_from_record)
     } else {
         pane_ref(state, id).rows.shown().get(index).cloned()
@@ -976,6 +976,12 @@ fn try_pane_pending(hwnd: HWND, id: PaneId) {
     let target_key = volume.key().to_string();
     release_for_navigation(hwnd, id, &target_key);
     match shell.open(volume, directory) {
+        Ok(opened) if opened.worker_busy() => {
+            // The names are already cached. Keep `pending` so the timer retries
+            // the revalidation. Storing this open would make `poll` settle the rows.
+            show_cached_listing(hwnd, id, &pending.path, opened);
+            ensure_timer(hwnd);
+        }
         Ok(opened) => {
             if let Some(state) = state_mut(hwnd) {
                 let pane = pane_mut(state, id);
@@ -1016,10 +1022,16 @@ fn present_directory(hwnd: HWND, id: PaneId, path: &str, mut opened: OpenedDirec
     let rows = DirectoryRows::from_cached(opened.cached.take());
     let shown = rows.shown().len();
     let needs_poll = !rows.is_settled();
-    let Some((list, address, active)) = (|| {
+    let Some((list, address, count, active)) = (|| {
         let state = state_mut(hwnd)?;
         let active = state.panes.active() == id;
         let address = state.address;
+        let count = displayed_count(
+            active,
+            state.query.is_active(),
+            state.search_hits.len(),
+            shown,
+        );
         {
             let pane = pane_mut(state, id);
             cancel_pane_thumbs(pane);
@@ -1033,11 +1045,11 @@ fn present_directory(hwnd: HWND, id: PaneId, path: &str, mut opened: OpenedDirec
             state.panes.set_path(id, path);
         }
         let list = pane_ref(state, id).list;
-        Some((list, address, active))
+        Some((list, address, count, active))
     })() else {
         return;
     };
-    set_count(list, shown);
+    set_count(list, count);
     if active {
         set_control_text(address, path);
         set_caption(hwnd, path);
@@ -1047,6 +1059,82 @@ fn present_directory(hwnd: HWND, id: PaneId, path: &str, mut opened: OpenedDirec
     if needs_poll {
         ensure_timer(hwnd);
     }
+}
+
+/// Paint a cache hit while its revalidation is still waiting for the volume worker.
+///
+/// `pending` stays set. The live `Err(VolumeBusy)` listing is not stored, so the
+/// next timer tick can open the directory again instead of settling the rows.
+fn show_cached_listing(hwnd: HWND, id: PaneId, path: &str, mut opened: OpenedDirectory) {
+    let Some(cached) = opened.cached.take() else {
+        return;
+    };
+    let already = state_mut(hwnd).is_some_and(|state| {
+        let pane = pane_ref(state, id);
+        pane.current == path && pane.rows.shown() == cached.as_slice()
+    });
+    if already {
+        return;
+    }
+    let rows = DirectoryRows::from_cached(Some(cached));
+    let shown = rows.shown().len();
+    let Some((list, address, count, active)) = (|| {
+        let state = state_mut(hwnd)?;
+        let active = state.panes.active() == id;
+        let address = state.address;
+        let count = displayed_count(
+            active,
+            state.query.is_active(),
+            state.search_hits.len(),
+            shown,
+        );
+        {
+            let pane = pane_mut(state, id);
+            if let Some(previous) = pane.opened.take() {
+                previous.cancel();
+            }
+            cancel_pane_thumbs(pane);
+            pane.rows = rows;
+            pane.current = path.to_string();
+        }
+        if active {
+            state.panes.set_active_path(path);
+        } else {
+            state.panes.set_path(id, path);
+        }
+        let list = pane_ref(state, id).list;
+        Some((list, address, count, active))
+    })() else {
+        return;
+    };
+    set_count(list, count);
+    if active {
+        set_control_text(address, path);
+        set_caption(hwnd, path);
+    }
+    unsafe { UpdateWindow(list) };
+}
+
+/// Search rows belong to the active list. The other list keeps its directory count.
+fn displayed_count(
+    active: bool,
+    query_active: bool,
+    search_len: usize,
+    directory_len: usize,
+) -> usize {
+    if list_shows_search(query_active, active) {
+        search_len
+    } else {
+        directory_len
+    }
+}
+
+/// Search hits fill a list only when that list was already the active pane.
+///
+/// A click on the other list is still a directory row. Activating the pane
+/// afterwards must not reread that index as a search hit.
+fn list_shows_search(query_active: bool, list_is_active: bool) -> bool {
+    query_active && list_is_active
 }
 
 fn follow_tree(hwnd: HWND, target: &str) {
@@ -1358,8 +1446,18 @@ fn drain_node(node: &mut FolderNode) -> ChildChange {
 }
 
 fn drain_pane(pane: &mut PaneView) -> RowChange {
-    let PaneView { opened, rows, .. } = pane;
+    let PaneView {
+        opened,
+        rows,
+        pending,
+        ..
+    } = pane;
     let Some(opened) = opened.as_mut() else {
+        // A busy cache hit is showing names and still has a pending open.
+        // Settling those rows would skip the revalidation.
+        if pending.is_some() {
+            return RowChange::Unchanged;
+        }
         rows.stop();
         return RowChange::Unchanged;
     };
@@ -1783,20 +1881,23 @@ fn on_item_activate(hwnd: HWND, lparam: LPARAM) {
     if info.iItem < 0 {
         return;
     }
-    if let Some(id) = state_mut(hwnd).and_then(|state| pane_id_from_list(state, info.hdr.hwndFrom))
-    {
+    let list = info.hdr.hwndFrom;
+    // Resolve the row before activation. The inactive list is showing directory
+    // rows, and activation must not turn that index into a search hit.
+    let path = activated_directory(hwnd, list, info.iItem as usize);
+    if let Some(id) = state_mut(hwnd).and_then(|state| pane_id_from_list(state, list)) {
         activate_pane(hwnd, id);
     }
-    let Some(path) = activated_directory(hwnd, info.iItem as usize) else {
+    let Some(path) = path else {
         return;
     };
     request_navigation(hwnd, path, NavKind::Push);
 }
 
-fn activated_directory(hwnd: HWND, index: usize) -> Option<String> {
+fn activated_directory(hwnd: HWND, list: HWND, index: usize) -> Option<String> {
     let state = state_mut(hwnd)?;
-    let id = state.panes.active();
-    if state.query.is_active() {
+    let id = pane_id_from_list(state, list)?;
+    if list_shows_search(state.query.is_active(), state.panes.active() == id) {
         let hit = state.search_hits.get(index)?;
         return hit.is_directory.then(|| hit.path.clone());
     }
@@ -2325,15 +2426,25 @@ fn on_context_menu(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
     let Some(id) = state_mut(hwnd).and_then(|state| pane_id_from_list(state, list)) else {
         return;
     };
-    activate_pane(hwnd, id);
     let point = context_point(lparam);
     select_at(list, point);
+    // Read the rows this list is showing now. Activation can switch the active
+    // list to search hits, and those indexes are a different set of paths.
+    let paths = paths_for_list(hwnd, list);
     let selected = selected_count(list);
+    let restore = selected_indexes(list);
+    activate_pane(hwnd, id);
+    let query_active = state_mut(hwnd).is_some_and(|state| state.query.is_active());
+    if !query_active && selected_count(list) == 0 {
+        for index in &restore {
+            set_selected(list, *index, true);
+        }
+    }
     let commands = commands::menu_for(selected, file_ops::clipboard_has_files());
     let Some(command) = popup_command(hwnd, &commands, point) else {
         return;
     };
-    run_command(hwnd, command);
+    run_command(hwnd, command, &paths);
 }
 
 fn context_point(lparam: LPARAM) -> POINT {
@@ -2436,26 +2547,26 @@ fn selected_indexes(list: HWND) -> Vec<usize> {
     indexes
 }
 
-fn selected_paths(hwnd: HWND) -> Vec<String> {
-    let Some(list) = list_handle(hwnd) else {
-        return Vec::new();
-    };
+fn paths_for_list(hwnd: HWND, list: HWND) -> Vec<String> {
     let indexes = selected_indexes(list);
     state_mut(hwnd)
         .map(|state| {
             indexes
                 .into_iter()
-                .filter_map(|index| {
-                    if state.query.is_active() {
-                        return Some(state.search_hits.get(index)?.path.clone());
-                    }
-                    let pane = pane_ref(state, state.panes.active());
-                    let name = pane.rows.shown().get(index)?.name.clone();
-                    Some(child_directory(&pane.current, &name))
-                })
+                .filter_map(|index| path_on_list(state, list, index))
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn path_on_list(state: &ListWindow, list: HWND, index: usize) -> Option<String> {
+    let id = pane_id_from_list(state, list)?;
+    if list_shows_search(state.query.is_active(), state.panes.active() == id) {
+        return Some(state.search_hits.get(index)?.path.clone());
+    }
+    let pane = pane_ref(state, id);
+    let name = pane.rows.shown().get(index)?.name.clone();
+    Some(child_directory(&pane.current, &name))
 }
 
 fn popup_command(hwnd: HWND, commands: &[Command], point: POINT) -> Option<Command> {
@@ -2513,21 +2624,24 @@ fn command_from_id(id: usize) -> Option<Command> {
     })
 }
 
-fn run_command(hwnd: HWND, command: Command) {
+fn run_command(hwnd: HWND, command: Command, paths: &[String]) {
     match command {
-        Command::Copy => copy_selection(hwnd, false),
-        Command::Cut => copy_selection(hwnd, true),
+        Command::Copy => {
+            let _ = file_ops::copy_paths(paths, false);
+        }
+        Command::Cut => {
+            let _ = file_ops::copy_paths(paths, true);
+        }
         Command::Paste => paste_into(hwnd),
         Command::Rename => begin_rename(hwnd),
-        Command::Delete => delete_selection(hwnd),
-        Command::Properties => properties_selection(hwnd),
-        Command::MoreOptions => begin_menu_host(hwnd),
+        Command::Delete => delete_selection(hwnd, paths),
+        Command::Properties => {
+            if paths.len() == 1 {
+                file_ops::show_properties(hwnd, &paths[0]);
+            }
+        }
+        Command::MoreOptions => begin_menu_host(hwnd, paths),
     }
-}
-
-fn copy_selection(hwnd: HWND, cut: bool) {
-    let paths = selected_paths(hwnd);
-    let _ = file_ops::copy_paths(&paths, cut);
 }
 
 fn paste_into(hwnd: HWND) {
@@ -2553,8 +2667,7 @@ fn paste_into(hwnd: HWND) {
     begin_file_op(hwnd, op, dest);
 }
 
-fn delete_selection(hwnd: HWND) {
-    let paths = selected_paths(hwnd);
+fn delete_selection(hwnd: HWND, paths: &[String]) {
     if paths.is_empty() {
         return;
     }
@@ -2581,14 +2694,13 @@ fn delete_selection(hwnd: HWND) {
     else {
         return;
     };
-    begin_file_op(hwnd, Op::Delete { paths }, directory);
-}
-
-fn properties_selection(hwnd: HWND) {
-    let paths = selected_paths(hwnd);
-    if paths.len() == 1 {
-        file_ops::show_properties(hwnd, &paths[0]);
-    }
+    begin_file_op(
+        hwnd,
+        Op::Delete {
+            paths: paths.to_vec(),
+        },
+        directory,
+    );
 }
 
 fn begin_rename(hwnd: HWND) {
@@ -2672,7 +2784,7 @@ fn file_op_pending_hwnd(hwnd: HWND) -> bool {
     state_mut(hwnd).is_some_and(|state| file_op_pending(state))
 }
 
-fn begin_menu_host(hwnd: HWND) {
+fn begin_menu_host(hwnd: HWND, paths: &[String]) {
     if menu_host_pending_hwnd(hwnd) {
         return;
     }
@@ -2681,8 +2793,7 @@ fn begin_menu_host(hwnd: HWND) {
     else {
         return;
     };
-    let paths = selected_paths(hwnd);
-    let Some(session) = HelperSession::beside_exe(&directory, &paths) else {
+    let Some(session) = HelperSession::beside_exe(&directory, paths) else {
         return;
     };
     if let Some(state) = state_mut(hwnd) {
@@ -2770,24 +2881,37 @@ fn poll_file_op(hwnd: HWND) {
 }
 
 fn refresh_directory(hwnd: HWND, directory: String) {
-    let Some(id) = state_mut(hwnd).and_then(|state| {
-        if state.left.current == directory {
-            Some(PaneId::Left)
-        } else if state.right.current == directory {
-            Some(PaneId::Right)
-        } else {
-            None
-        }
-    }) else {
+    // Both panes can show this directory. Refreshing only the left list leaves
+    // the right list stale, and a retry then reopens the left listing.
+    let targets = state_mut(hwnd)
+        .map(|state| refresh_targets(&state.left.current, &state.right.current, &directory));
+    let Some(targets) = targets else {
         return;
     };
+    if targets.is_empty() {
+        return;
+    }
     if let Some(state) = state_mut(hwnd) {
-        pane_mut(state, id).pending = Some(PendingNav {
-            path: directory,
-            kind: NavKind::Refresh,
-        });
+        for id in &targets {
+            pane_mut(state, *id).pending = Some(PendingNav {
+                path: directory.clone(),
+                kind: NavKind::Refresh,
+            });
+        }
     }
     try_pending(hwnd);
+}
+
+/// Every pane whose `current` path is `directory`.
+fn refresh_targets(left: &str, right: &str, directory: &str) -> Vec<PaneId> {
+    let mut ids = Vec::new();
+    if left == directory {
+        ids.push(PaneId::Left);
+    }
+    if right == directory {
+        ids.push(PaneId::Right);
+    }
+    ids
 }
 
 fn on_destroy(hwnd: HWND) {
@@ -2980,4 +3104,37 @@ fn last_error() -> u32 {
 
 fn destroy(hwnd: HWND) {
     unsafe { DestroyWindow(hwnd) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{displayed_count, list_shows_search, refresh_targets, PaneId};
+
+    #[test]
+    fn refresh_includes_every_pane_on_that_directory() {
+        assert_eq!(
+            refresh_targets(r"C:\docs", r"C:\docs", r"C:\docs"),
+            vec![PaneId::Left, PaneId::Right]
+        );
+        assert_eq!(
+            refresh_targets(r"C:\left", r"C:\docs", r"C:\docs"),
+            vec![PaneId::Right]
+        );
+        assert!(refresh_targets(r"C:\left", r"C:\right", r"C:\docs").is_empty());
+    }
+
+    #[test]
+    fn inactive_list_keeps_directory_rows_during_a_query() {
+        assert!(!list_shows_search(true, false));
+        assert!(list_shows_search(true, true));
+        assert!(!list_shows_search(false, true));
+        assert!(!list_shows_search(false, false));
+    }
+
+    #[test]
+    fn active_search_count_survives_a_directory_present() {
+        assert_eq!(displayed_count(true, true, 2, 40), 2);
+        assert_eq!(displayed_count(false, true, 2, 40), 40);
+        assert_eq!(displayed_count(true, false, 2, 40), 40);
+    }
 }

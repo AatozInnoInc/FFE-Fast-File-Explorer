@@ -134,6 +134,14 @@ impl OpenedDirectory {
     pub fn cancel(&self) {
         Shell::cancel(self);
     }
+
+    /// The cache returned entries and this volume's worker was already taken.
+    ///
+    /// [`Self::poll`] repeats [`EnumError::VolumeBusy`]. The cached names are in
+    /// [`Self::cached`]. A later `open` starts the revalidation once the worker is free.
+    pub fn worker_busy(&self) -> bool {
+        matches!(&self.live, Err(EnumError::VolumeBusy))
+    }
 }
 
 #[cfg(test)]
@@ -258,6 +266,48 @@ mod tests {
             "open waited {elapsed:?}"
         );
         assert_eq!(names(second.cached.as_ref().unwrap()), ["a", "b"]);
+    }
+
+    #[test]
+    fn cached_hit_on_a_busy_volume_keeps_entries_and_reports_busy() {
+        let shell = Shell::new();
+        let mut first = shell
+            .open_scripted(
+                volume("shell-busy-hit", VolumeKind::Local),
+                Path::new("C:\\docs"),
+                ScriptedSource::entries(vec![(sample("a"), Duration::ZERO)]),
+            )
+            .unwrap();
+        drive(&mut first, Duration::from_secs(1));
+
+        let slow = shell
+            .open_scripted(
+                volume("shell-busy-hit", VolumeKind::Local),
+                Path::new("C:\\docs"),
+                ScriptedSource::hang(),
+            )
+            .unwrap();
+        assert!(!slow.worker_busy());
+        assert_eq!(names(slow.cached.as_ref().unwrap()), ["a"]);
+
+        let missed = shell.open_scripted(
+            volume("shell-busy-hit", VolumeKind::Local),
+            Path::new("C:\\other"),
+            ScriptedSource::entries(vec![(sample("b"), Duration::ZERO)]),
+        );
+        assert!(matches!(missed, Err(EnumError::VolumeBusy)));
+
+        let mut hit = shell
+            .open_scripted(
+                volume("shell-busy-hit", VolumeKind::Local),
+                Path::new("C:\\docs"),
+                ScriptedSource::entries(vec![(sample("c"), Duration::ZERO)]),
+            )
+            .unwrap();
+        assert!(hit.worker_busy());
+        assert_eq!(names(hit.cached.as_ref().unwrap()), ["a"]);
+        assert!(matches!(hit.poll(), Err(EnumError::VolumeBusy)));
+        slow.cancel();
     }
 
     #[test]
