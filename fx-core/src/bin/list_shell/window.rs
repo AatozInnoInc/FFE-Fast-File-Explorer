@@ -11,8 +11,9 @@
 //! covers the icon once it is ready. The list's context menu copies, cuts,
 //! pastes, renames, deletes, and opens properties. More options asks a helper
 //! process supervised by the watchdog. That helper returns no verbs and does
-//! not load a shell extension. A Network node stays collapsed until the user
-//! expands it.
+//! not load a shell extension. A Timeout button stores the network timeout.
+//! Local volumes do not use it, and a timeout is not retried. A Network node
+//! stays collapsed until the user expands it.
 
 use std::collections::HashMap;
 use std::mem;
@@ -69,6 +70,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use fx_core::helper::HelperSession;
+use fx_core::settings::TimeoutSetting;
 use fx_core::thumbs::{ThumbCache, ThumbTicket, TryThumb};
 use fx_core::{EnumError, NetworkBrowse, NetworkPlace, OpenedDirectory, Path, Shell, VolumeId};
 
@@ -82,6 +84,7 @@ use crate::images;
 use crate::nav::{normalize_address, same_directory, tree_root, History, TreeRoot};
 use crate::places::{PlaceChange, PlaceList};
 use crate::rows::{DirectoryRows, RowChange};
+use crate::timeout;
 use crate::tree::{child_directory, ChildChange, Expansion};
 
 /// How often the UI thread drains `Shell::poll`. Not the ≤16 ms paint budget.
@@ -99,6 +102,9 @@ const ID_TREE: isize = 2;
 const ID_BACK: isize = 3;
 const ID_FORWARD: isize = 4;
 const ID_ADDRESS: isize = 5;
+const ID_TIMEOUT: isize = 6;
+/// Width of the Timeout button. Not a performance budget.
+const TIMEOUT_WIDTH: i32 = 84;
 const NETWORK_LABEL: &str = "Network";
 const CLASS_NAME: windows_sys::core::PCWSTR = w!("RapidExplorerList");
 
@@ -135,6 +141,10 @@ struct ListWindow {
     file_op: Option<FileOp>,
     /// More options helper. At most one. Drop kills it and does not join.
     menu_host: Option<HelperSession>,
+    /// Network-timeout button.
+    timeout: HWND,
+    /// `rapid-explorer-settings.txt` beside this executable.
+    settings_file: std::path::PathBuf,
 }
 
 struct ThumbJob {
@@ -222,10 +232,14 @@ pub fn run() -> ExitCode {
         return ExitCode::from(2);
     };
     let path = Path::new(directory);
-    let shell = Shell::new();
+    let settings_file = fx_core::settings::beside_exe()
+        .unwrap_or_else(|| std::path::PathBuf::from("rapid-explorer-settings.txt"));
+    let mut shell = Shell::new();
+    let setting = TimeoutSetting::load(&settings_file).unwrap_or_default();
+    shell.set_network_timeout(setting);
     let start = match shell.open(VolumeId::from_directory(&path), path.clone()) {
-        Ok(opened) => WindowStart::opened(shell, path, opened),
-        Err(err) => WindowStart::failed(shell, path, err),
+        Ok(opened) => WindowStart::opened(shell, path, opened, settings_file),
+        Err(err) => WindowStart::failed(shell, path, err, settings_file),
     };
 
     let class = WNDCLASSW {
@@ -283,10 +297,16 @@ struct WindowStart {
     caption: String,
     opened: Option<OpenedDirectory>,
     rows: DirectoryRows,
+    settings_file: std::path::PathBuf,
 }
 
 impl WindowStart {
-    fn opened(shell: Shell, path: Path, mut opened: OpenedDirectory) -> Self {
+    fn opened(
+        shell: Shell,
+        path: Path,
+        mut opened: OpenedDirectory,
+        settings_file: std::path::PathBuf,
+    ) -> Self {
         let rows = DirectoryRows::from_cached(opened.cached.take());
         Self {
             shell,
@@ -294,10 +314,11 @@ impl WindowStart {
             caption: format!("Rapid Explorer — {}", path.as_str()),
             opened: Some(opened),
             rows,
+            settings_file,
         }
     }
 
-    fn failed(shell: Shell, path: Path, err: EnumError) -> Self {
+    fn failed(shell: Shell, path: Path, err: EnumError, settings_file: std::path::PathBuf) -> Self {
         let mut rows = DirectoryRows::from_cached(None);
         rows.stop();
         Self {
@@ -306,6 +327,7 @@ impl WindowStart {
             caption: format!("Rapid Explorer — {} — {err}", path.as_str()),
             opened: None,
             rows,
+            settings_file,
         }
     }
 }
@@ -374,6 +396,15 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
         ID_ADDRESS,
         "address bar",
     )?;
+    let timeout = create_control(
+        hwnd,
+        WC_BUTTONW,
+        "Timeout",
+        button_style(),
+        0,
+        ID_TIMEOUT,
+        "timeout button",
+    )?;
 
     let root = start.root.clone();
     let polling = !start.rows.is_settled();
@@ -399,6 +430,8 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
         thumb_jobs: HashMap::new(),
         file_op: None,
         menu_host: None,
+        timeout,
+        settings_file: start.settings_file,
     });
     let shown = state.rows.shown().len();
     unsafe {
@@ -623,7 +656,25 @@ fn on_command(hwnd: HWND, wparam: WPARAM) {
     match id {
         ID_BACK => go_back(hwnd),
         ID_FORWARD => go_forward(hwnd),
+        ID_TIMEOUT => edit_timeout(hwnd),
         _ => {}
+    }
+}
+
+fn edit_timeout(hwnd: HWND) {
+    let Some((millis, path)) = state_mut(hwnd).map(|state| {
+        let millis = u64::try_from(state.shell.network_timeout().as_millis()).unwrap_or(2_000);
+        (millis, state.settings_file.clone())
+    }) else {
+        return;
+    };
+    let Some(saved) = timeout::show(hwnd, millis, &path) else {
+        return;
+    };
+    if let Some(state) = state_mut(hwnd) {
+        state
+            .shell
+            .set_network_timeout(TimeoutSetting { millis: saved });
     }
 }
 
@@ -1825,9 +1876,15 @@ fn fit_panes(hwnd: HWND) {
     let Some(list) = list_handle(hwnd) else {
         return;
     };
-    let Some((tree, back, forward, address)) =
-        state_mut(hwnd).map(|state| (state.tree, state.back, state.forward, state.address))
-    else {
+    let Some((tree, back, forward, address, timeout)) = state_mut(hwnd).map(|state| {
+        (
+            state.tree,
+            state.back,
+            state.forward,
+            state.address,
+            state.timeout,
+        )
+    }) else {
         return;
     };
     let mut rect = RECT {
@@ -1844,7 +1901,9 @@ fn fit_panes(hwnd: HWND) {
         let forward_x = BACK_WIDTH + NAV_GAP;
         MoveWindow(forward, forward_x, 0, FORWARD_WIDTH, NAV_HEIGHT, 1);
         let address_x = forward_x + FORWARD_WIDTH + NAV_GAP;
-        let address_width = (width - address_x).max(0);
+        let timeout_x = (width - TIMEOUT_WIDTH).max(address_x);
+        MoveWindow(timeout, timeout_x, 0, TIMEOUT_WIDTH, NAV_HEIGHT, 1);
+        let address_width = (timeout_x - NAV_GAP - address_x).max(0);
         MoveWindow(address, address_x, 0, address_width, NAV_HEIGHT, 1);
         let top = NAV_HEIGHT + NAV_GAP;
         let body = (height - top).max(0);
