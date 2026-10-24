@@ -6,8 +6,11 @@
 
 mod cell;
 mod columns;
+mod commands;
 #[cfg(windows)]
 mod draw;
+#[cfg(windows)]
+mod file_ops;
 mod icons;
 mod images;
 mod nav;

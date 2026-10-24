@@ -8,8 +8,10 @@
 //! Date modified are DirectWrite cells for the rows the list view asks to paint.
 //! The Name column stays with the list view so the icon remains. An image in a
 //! visible row requests a thumbnail on the background pool, and that buffer
-//! covers the icon once it is ready. A Network
-//! node stays collapsed until the user expands it.
+//! covers the icon once it is ready. The list's context menu copies, cuts,
+//! pastes, renames, deletes, and opens properties. More options does not load
+//! a shell extension in this process. A Network node stays collapsed until the
+//! user expands it.
 
 use std::collections::HashMap;
 use std::mem;
@@ -20,7 +22,7 @@ use windows_sys::core::w;
 use windows_sys::Win32::Foundation::{
     GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
-use windows_sys::Win32::Graphics::Gdi::{UpdateWindow, COLOR_WINDOW, HBRUSH};
+use windows_sys::Win32::Graphics::Gdi::{ScreenToClient, UpdateWindow, COLOR_WINDOW, HBRUSH};
 use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
 use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -29,11 +31,13 @@ use windows_sys::Win32::UI::Controls::{
     CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDDS_SUBITEM, CDRF_DODEFAULT, CDRF_NOTIFYITEMDRAW,
     CDRF_NOTIFYPOSTPAINT, CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, HIMAGELIST, HTREEITEM,
     ICC_LISTVIEW_CLASSES, ICC_TREEVIEW_CLASSES, ILC_COLOR32, ILC_MASK, INITCOMMONCONTROLSEX,
-    I_IMAGENONE, LVCFMT_LEFT, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT,
-    LVIR_ICON, LVIS_SELECTED, LVM_GETCOUNTPERPAGE, LVM_GETITEMSTATE, LVM_GETSUBITEMRECT,
-    LVM_GETTOPINDEX, LVM_INSERTCOLUMNW, LVM_REDRAWITEMS, LVM_SETCOLUMNWIDTH,
-    LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMCOUNT, LVN_GETDISPINFOW,
-    LVN_ITEMACTIVATE, LVSICF_NOSCROLL, LVSIL_SMALL, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
+    I_IMAGENONE, LVCFMT_LEFT, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVHITTESTINFO,
+    LVIF_IMAGE, LVIF_STATE, LVIF_TEXT, LVIR_ICON, LVIS_SELECTED, LVITEMW, LVM_EDITLABELW,
+    LVM_GETCOUNTPERPAGE, LVM_GETITEMSTATE, LVM_GETNEXTITEM, LVM_GETSELECTEDCOUNT,
+    LVM_GETSUBITEMRECT, LVM_GETTOPINDEX, LVM_HITTEST, LVM_INSERTCOLUMNW, LVM_REDRAWITEMS,
+    LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMCOUNT,
+    LVM_SETITEMSTATE, LVNI_SELECTED, LVN_ENDLABELEDITW, LVN_GETDISPINFOW, LVN_ITEMACTIVATE,
+    LVSICF_NOSCROLL, LVSIL_SMALL, LVS_EDITLABELS, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
     LVS_NOSORTHEADER, LVS_OWNERDATA, LVS_REPORT, LVS_SHOWSELALWAYS, NMHDR, NMLISTVIEW,
     NMLVCUSTOMDRAW, NMLVDISPINFOW, NMTREEVIEWW, NM_CUSTOMDRAW, TVE_COLLAPSE, TVE_EXPAND,
     TVGN_CARET, TVIF_CHILDREN, TVIF_HANDLE, TVIF_PARAM, TVIF_TEXT, TVINSERTSTRUCTW,
@@ -49,13 +53,15 @@ use windows_sys::Win32::UI::Shell::{
     SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_SMALLICON, SHGFI_USEFILEATTRIBUTES,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW, GetAncestor,
-    GetClientRect, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowTextLengthW,
-    GetWindowTextW, KillTimer, LoadCursorW, MoveWindow, PostQuitMessage, RegisterClassW,
-    SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowTextW, ShowWindow, TranslateMessage,
-    BN_CLICKED, BS_PUSHBUTTON, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, ES_AUTOHSCROLL, GA_ROOT,
-    GWLP_USERDATA, GWL_STYLE, HMENU, IDC_ARROW, MSG, SIZE_MINIMIZED, SM_CXSMICON, SM_CYSMICON,
-    SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_DESTROY, WM_GETFONT, WM_KEYDOWN,
+    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
+    DestroyWindow, DispatchMessageW, GetAncestor, GetClientRect, GetCursorPos, GetMessageW,
+    GetSystemMetrics, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, KillTimer,
+    LoadCursorW, MessageBoxW, MoveWindow, PostQuitMessage, RegisterClassW, SendMessageW, SetTimer,
+    SetWindowLongPtrW, SetWindowTextW, ShowWindow, TrackPopupMenu, TranslateMessage, BN_CLICKED,
+    BS_PUSHBUTTON, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, ES_AUTOHSCROLL, GA_ROOT, GWLP_USERDATA,
+    GWL_STYLE, HMENU, IDC_ARROW, IDYES, MB_ICONWARNING, MB_YESNO, MF_SEPARATOR, MF_STRING, MSG,
+    SIZE_MINIMIZED, SM_CXSMICON, SM_CYSMICON, SW_SHOW, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_GETFONT, WM_KEYDOWN,
     WM_NOTIFY, WM_SIZE, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN,
     WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
@@ -65,7 +71,9 @@ use fx_core::{EnumError, NetworkBrowse, NetworkPlace, OpenedDirectory, Path, She
 
 use crate::cell;
 use crate::columns;
+use crate::commands::{self, Command};
 use crate::draw::{self, CellRect};
+use crate::file_ops::{self, FileOp, Op};
 use crate::icons::{icon_key, IconCache, IconKey};
 use crate::images;
 use crate::nav::{normalize_address, same_directory, tree_root, History, TreeRoot};
@@ -120,6 +128,8 @@ struct ListWindow {
     thumbs: ThumbCache,
     /// Tickets for the directory on screen. Navigation cancels these.
     thumb_jobs: HashMap<String, ThumbJob>,
+    /// Paste, delete, or rename running off this thread. At most one.
+    file_op: Option<FileOp>,
 }
 
 struct ThumbJob {
@@ -157,6 +167,8 @@ enum NavKind {
     Push,
     Back,
     Forward,
+    /// Re-list the current directory after a file operation. Does not push history.
+    Refresh,
 }
 
 #[derive(Clone)]
@@ -380,6 +392,7 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
         polling,
         thumbs: ThumbCache::with_decoder(images::decode_image),
         thumb_jobs: HashMap::new(),
+        file_op: None,
     });
     let shown = state.rows.shown().len();
     unsafe {
@@ -461,6 +474,7 @@ fn list_style() -> WINDOW_STYLE {
         | LVS_OWNERDATA
         | LVS_SHOWSELALWAYS
         | LVS_NOSORTHEADER
+        | LVS_EDITLABELS
 }
 
 fn button_style() -> WINDOW_STYLE {
@@ -581,6 +595,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             on_command(hwnd, wparam);
             0
         }
+        WM_CONTEXTMENU => {
+            on_context_menu(hwnd, wparam, lparam);
+            0
+        }
         WM_NOTIFY => on_notify(hwnd, lparam),
         WM_DESTROY => {
             on_destroy(hwnd);
@@ -690,6 +708,7 @@ fn commit_history(state: &mut ListWindow, pending: &PendingNav) {
         NavKind::Forward => {
             let _ = state.history.forward();
         }
+        NavKind::Refresh => {}
     }
 }
 
@@ -844,6 +863,7 @@ fn on_timer(hwnd: HWND) {
         let idle = state.pending.is_none()
             && state.rows.is_settled()
             && !thumbs_pending(state)
+            && !file_op_pending(state)
             && state
                 .nodes
                 .iter()
@@ -861,6 +881,7 @@ fn on_timer(hwnd: HWND) {
     if thumb_ready {
         redraw_visible(list);
     }
+    poll_file_op(hwnd);
     for (index, child_change) in tree_changes {
         match child_change {
             NodeChange::Directories(change) => apply_children(hwnd, index, change),
@@ -992,6 +1013,7 @@ fn on_notify(hwnd: HWND, lparam: LPARAM) -> LRESULT {
             on_list_dispinfo(hwnd, lparam);
             0
         }
+        LVN_ENDLABELEDITW => on_end_label_edit(hwnd, lparam),
         LVN_ITEMACTIVATE => {
             on_item_activate(hwnd, lparam);
             0
@@ -1842,6 +1864,360 @@ fn fit_panes(hwnd: HWND) {
             columns::MODIFIED as WPARAM,
             columns::MODIFIED_WIDTH as LPARAM,
         );
+    }
+}
+
+fn on_context_menu(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
+    let Some(list) = list_handle(hwnd) else {
+        return;
+    };
+    if wparam as HWND != list {
+        return;
+    }
+    let point = context_point(lparam);
+    select_at(list, point);
+    let selected = selected_count(list);
+    let commands = commands::menu_for(selected, file_ops::clipboard_has_files());
+    let Some(command) = popup_command(hwnd, &commands, point) else {
+        return;
+    };
+    run_command(hwnd, command);
+}
+
+fn context_point(lparam: LPARAM) -> POINT {
+    if lparam == -1 {
+        let mut point = POINT { x: 0, y: 0 };
+        unsafe { GetCursorPos(&mut point) };
+        point
+    } else {
+        POINT {
+            x: (lparam as u32 & 0xffff) as i16 as i32,
+            y: ((lparam as u32) >> 16) as i16 as i32,
+        }
+    }
+}
+
+fn select_at(list: HWND, screen: POINT) {
+    let mut client = screen;
+    unsafe { ScreenToClient(list, &mut client) };
+    let mut hit = LVHITTESTINFO {
+        pt: client,
+        flags: 0,
+        iItem: -1,
+        iSubItem: 0,
+        iGroup: 0,
+    };
+    let index = unsafe {
+        SendMessageW(
+            list,
+            LVM_HITTEST,
+            0,
+            &mut hit as *mut LVHITTESTINFO as LPARAM,
+        )
+    };
+    if index < 0 || row_selected(list, index as usize) {
+        return;
+    }
+    set_selected(list, usize::MAX, false);
+    set_selected(list, index as usize, true);
+}
+
+fn set_selected(list: HWND, row: usize, selected: bool) {
+    let mut item = LVITEMW {
+        mask: LVIF_STATE,
+        iItem: 0,
+        iSubItem: 0,
+        state: if selected { LVIS_SELECTED } else { 0 },
+        stateMask: LVIS_SELECTED,
+        pszText: ptr::null_mut(),
+        cchTextMax: 0,
+        iImage: 0,
+        lParam: 0,
+        iIndent: 0,
+        iGroupId: 0,
+        cColumns: 0,
+        puColumns: ptr::null_mut(),
+        piColFmt: ptr::null_mut(),
+        iGroup: 0,
+    };
+    let index = if row == usize::MAX {
+        -1isize as WPARAM
+    } else {
+        row as WPARAM
+    };
+    unsafe {
+        SendMessageW(
+            list,
+            LVM_SETITEMSTATE,
+            index,
+            &mut item as *mut LVITEMW as LPARAM,
+        );
+    }
+}
+
+fn selected_count(list: HWND) -> usize {
+    let count = unsafe { SendMessageW(list, LVM_GETSELECTEDCOUNT, 0, 0) };
+    if count < 0 {
+        0
+    } else {
+        count as usize
+    }
+}
+
+fn selected_indexes(list: HWND) -> Vec<usize> {
+    let mut indexes = Vec::new();
+    let mut index = -1isize;
+    loop {
+        index = unsafe {
+            SendMessageW(
+                list,
+                LVM_GETNEXTITEM,
+                index as WPARAM,
+                LVNI_SELECTED as LPARAM,
+            )
+        };
+        if index < 0 {
+            break;
+        }
+        indexes.push(index as usize);
+    }
+    indexes
+}
+
+fn selected_paths(hwnd: HWND) -> Vec<String> {
+    let Some(list) = list_handle(hwnd) else {
+        return Vec::new();
+    };
+    let indexes = selected_indexes(list);
+    state_mut(hwnd)
+        .map(|state| {
+            indexes
+                .into_iter()
+                .filter_map(|index| {
+                    let name = state.rows.shown().get(index)?.name.clone();
+                    Some(child_directory(&state.current, &name))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn popup_command(hwnd: HWND, commands: &[Command], point: POINT) -> Option<Command> {
+    if commands.is_empty() {
+        return None;
+    }
+    let menu = unsafe { CreatePopupMenu() };
+    if menu.is_null() {
+        return None;
+    }
+    for (index, command) in commands.iter().enumerate() {
+        if *command == Command::MoreOptions && index > 0 {
+            unsafe { AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null()) };
+        }
+        let label = wide(commands::label(*command));
+        unsafe { AppendMenuW(menu, MF_STRING, command_id(*command), label.as_ptr()) };
+    }
+    let picked = unsafe {
+        TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON,
+            point.x,
+            point.y,
+            0,
+            hwnd,
+            ptr::null(),
+        )
+    };
+    unsafe { DestroyMenu(menu) };
+    command_from_id(picked as usize)
+}
+
+fn command_id(command: Command) -> usize {
+    match command {
+        Command::Copy => 1,
+        Command::Cut => 2,
+        Command::Paste => 3,
+        Command::Rename => 4,
+        Command::Delete => 5,
+        Command::Properties => 6,
+        Command::MoreOptions => 7,
+    }
+}
+
+fn command_from_id(id: usize) -> Option<Command> {
+    Some(match id {
+        1 => Command::Copy,
+        2 => Command::Cut,
+        3 => Command::Paste,
+        4 => Command::Rename,
+        5 => Command::Delete,
+        6 => Command::Properties,
+        7 => Command::MoreOptions,
+        _ => return None,
+    })
+}
+
+fn run_command(hwnd: HWND, command: Command) {
+    match command {
+        Command::Copy => copy_selection(hwnd, false),
+        Command::Cut => copy_selection(hwnd, true),
+        Command::Paste => paste_into(hwnd),
+        Command::Rename => begin_rename(hwnd),
+        Command::Delete => delete_selection(hwnd),
+        Command::Properties => properties_selection(hwnd),
+        Command::MoreOptions => {}
+    }
+}
+
+fn copy_selection(hwnd: HWND, cut: bool) {
+    let paths = selected_paths(hwnd);
+    let _ = file_ops::copy_paths(&paths, cut);
+}
+
+fn paste_into(hwnd: HWND) {
+    let Some(paste) = file_ops::paste_request() else {
+        return;
+    };
+    let Some(dest) = state_mut(hwnd).map(|state| state.current.clone()) else {
+        return;
+    };
+    let op = if paste.cut {
+        Op::MoveInto {
+            sources: paste.sources,
+            dest: dest.clone(),
+        }
+    } else {
+        Op::CopyInto {
+            sources: paste.sources,
+            dest: dest.clone(),
+        }
+    };
+    begin_file_op(hwnd, op, dest);
+}
+
+fn delete_selection(hwnd: HWND) {
+    let paths = selected_paths(hwnd);
+    if paths.is_empty() {
+        return;
+    }
+    let prompt = if paths.len() == 1 {
+        "Delete this item?".to_string()
+    } else {
+        format!("Delete {} items?", paths.len())
+    };
+    let text = wide(&prompt);
+    let title = wide("Rapid Explorer");
+    let answer = unsafe {
+        MessageBoxW(
+            hwnd,
+            text.as_ptr(),
+            title.as_ptr(),
+            MB_YESNO | MB_ICONWARNING,
+        )
+    };
+    if answer != IDYES {
+        return;
+    }
+    let Some(directory) = state_mut(hwnd).map(|state| state.current.clone()) else {
+        return;
+    };
+    begin_file_op(hwnd, Op::Delete { paths }, directory);
+}
+
+fn properties_selection(hwnd: HWND) {
+    let paths = selected_paths(hwnd);
+    if paths.len() == 1 {
+        file_ops::show_properties(hwnd, &paths[0]);
+    }
+}
+
+fn begin_rename(hwnd: HWND) {
+    let Some(list) = list_handle(hwnd) else {
+        return;
+    };
+    let indexes = selected_indexes(list);
+    if indexes.len() != 1 {
+        return;
+    }
+    unsafe { SendMessageW(list, LVM_EDITLABELW, indexes[0] as WPARAM, 0) };
+}
+
+fn on_end_label_edit(hwnd: HWND, lparam: LPARAM) -> LRESULT {
+    let info = unsafe { &*(lparam as *const NMLVDISPINFOW) };
+    let item = &info.item;
+    if item.pszText.is_null() || item.iItem < 0 {
+        return 0;
+    }
+    let new_name = control_text_from(item.pszText);
+    let rename = state_mut(hwnd).and_then(|state| {
+        let entry = state.rows.shown().get(item.iItem as usize)?;
+        let accepted = commands::accepted_rename(&entry.name, &new_name)?;
+        let from = child_directory(&state.current, &entry.name);
+        let to = child_directory(&state.current, &accepted);
+        let directory = state.current.clone();
+        Some((from, to, directory))
+    });
+    if let Some((from, to, directory)) = rename {
+        begin_file_op(hwnd, Op::Rename { from, to }, directory);
+    }
+    0
+}
+
+fn control_text_from(text: *const u16) -> String {
+    if text.is_null() {
+        return String::new();
+    }
+    let mut len = 0usize;
+    unsafe {
+        while *text.add(len) != 0 {
+            len += 1;
+            if len > 32_768 {
+                break;
+            }
+        }
+        String::from_utf16_lossy(std::slice::from_raw_parts(text, len))
+    }
+}
+
+fn begin_file_op(hwnd: HWND, op: Op, directory: String) {
+    if file_op_pending_hwnd(hwnd) {
+        return;
+    }
+    let Some(file_op) = FileOp::start(op, directory) else {
+        return;
+    };
+    if let Some(state) = state_mut(hwnd) {
+        state.file_op = Some(file_op);
+    }
+    ensure_timer(hwnd);
+}
+
+fn file_op_pending(state: &ListWindow) -> bool {
+    state
+        .file_op
+        .as_ref()
+        .is_some_and(|op| op.try_recv().is_none())
+}
+
+fn file_op_pending_hwnd(hwnd: HWND) -> bool {
+    state_mut(hwnd).is_some_and(|state| file_op_pending(state))
+}
+
+fn poll_file_op(hwnd: HWND) {
+    let outcome = state_mut(hwnd).and_then(|state| {
+        let op = state.file_op.as_ref()?;
+        let ok = op.try_recv()?;
+        Some((ok, op.directory().to_string()))
+    });
+    let Some((ok, directory)) = outcome else {
+        return;
+    };
+    if let Some(state) = state_mut(hwnd) {
+        state.file_op = None;
+    }
+    let same = state_mut(hwnd).is_some_and(|state| state.current == directory);
+    if ok && same {
+        request_navigation(hwnd, directory, NavKind::Refresh);
     }
 }
 
