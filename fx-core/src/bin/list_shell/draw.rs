@@ -1,12 +1,16 @@
 //! DirectWrite for one list-view cell.
 //!
-//! The factories are created once on the UI thread. A failed factory leaves
-//! the caller to paint the dispinfo string. Painting does not read a directory
-//! and does not wait.
+//! The factories are created once on the UI thread. The text format is the
+//! list view's own font, and the colors follow [`crate::cell::selection`].
+//! A failed factory or a font DirectWrite cannot build leaves the caller to
+//! paint the dispinfo string. Painting does not read a directory and does not
+//! wait.
 
 use std::cell::RefCell;
+use std::mem;
+use std::ptr;
 
-use windows::core::w;
+use windows::core::{w, PCWSTR};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F,
 };
@@ -18,15 +22,19 @@ use windows::Win32::Graphics::Direct2D::{
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteTextFormat,
-    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-    DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC,
+    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_MEASURING_MODE_NATURAL,
+    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::HDC;
 use windows_sys::Win32::Graphics::Gdi::{
-    GetSysColor, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT,
+    CreateCompatibleDC, DeleteDC, GetObjectW, GetSysColor, GetTextMetricsW, SelectObject,
+    COLOR_BTNFACE, COLOR_BTNTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW,
+    COLOR_WINDOWTEXT, LOGFONTW, TEXTMETRICW,
 };
+
+use crate::cell::{dip_size, negative_em, RowColors};
 
 /// `D2DERR_RECREATE_TARGET`. The DC target must be built again after this.
 const RECREATE_TARGET: i32 = 0x8899_000C_u32 as i32;
@@ -42,10 +50,34 @@ pub struct CellRect {
 
 struct Painter {
     factory: ID2D1Factory,
-    format: IDWriteTextFormat,
+    write: IDWriteFactory,
+    format: Option<(FontKey, IDWriteTextFormat)>,
+    /// This list-view font could not be built. Later cells with the same font
+    /// stay with the control instead of trying again.
+    failed: Option<FontKey>,
     target: Option<ID2D1DCRenderTarget>,
     /// Creating the DC target failed. Later cells keep the list view's text.
     target_broken: bool,
+}
+
+/// The list-view font, reduced to what DirectWrite needs for one text format.
+/// `height` is `lfHeight`. The em size is derived from it when the format is built.
+#[derive(PartialEq, Eq)]
+struct FontKey {
+    face: [u16; 32],
+    height: i32,
+    weight: i32,
+    italic: u8,
+    dpi_bits: u32,
+}
+
+struct Request<'a> {
+    hdc: *mut core::ffi::c_void,
+    font: *mut core::ffi::c_void,
+    bounds: CellRect,
+    text_bounds: CellRect,
+    text: &'a str,
+    colors: RowColors,
 }
 
 enum Slot {
@@ -60,17 +92,26 @@ thread_local! {
 }
 
 /// Fills `bounds` and draws `text` with DirectWrite. False means the list view
-/// should paint the string itself.
+/// should paint the string itself. `font` is the list view's `WM_GETFONT`.
 pub fn paint_text(
     hdc: *mut core::ffi::c_void,
+    font: *mut core::ffi::c_void,
     bounds: CellRect,
     text_bounds: CellRect,
     text: &str,
-    selected: bool,
+    colors: RowColors,
 ) -> bool {
-    if hdc.is_null() || text.is_empty() || !positive(bounds) {
+    if hdc.is_null() || font.is_null() || text.is_empty() || !positive(bounds) {
         return false;
     }
+    let request = Request {
+        hdc,
+        font,
+        bounds,
+        text_bounds,
+        text,
+        colors,
+    };
     PAINTER.with(|slot| {
         let current = slot.replace(Slot::Busy);
         match current {
@@ -80,27 +121,19 @@ pub fn paint_text(
                 false
             }
             Slot::Untried => match Painter::create() {
-                Ok(painter) => finish(slot, painter, hdc, bounds, text_bounds, text, selected),
+                Ok(painter) => finish(slot, painter, &request),
                 Err(()) => {
                     *slot.borrow_mut() = Slot::Failed;
                     false
                 }
             },
-            Slot::Ready(painter) => finish(slot, painter, hdc, bounds, text_bounds, text, selected),
+            Slot::Ready(painter) => finish(slot, painter, &request),
         }
     })
 }
 
-fn finish(
-    slot: &RefCell<Slot>,
-    mut painter: Painter,
-    hdc: *mut core::ffi::c_void,
-    bounds: CellRect,
-    text_bounds: CellRect,
-    text: &str,
-    selected: bool,
-) -> bool {
-    let ok = painter.paint(hdc, bounds, text_bounds, text, selected);
+fn finish(slot: &RefCell<Slot>, mut painter: Painter, request: &Request<'_>) -> bool {
+    let ok = painter.paint(request);
     *slot.borrow_mut() = Slot::Ready(painter);
     ok
 }
@@ -112,42 +145,46 @@ impl Painter {
                 .map_err(|_| ())?;
         let write: IDWriteFactory =
             unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }.map_err(|_| ())?;
-        let format = text_format(&write)?;
         let target = create_target(&factory).ok();
         Ok(Self {
             factory,
-            format,
+            write,
+            format: None,
+            failed: None,
             target_broken: target.is_none(),
             target,
         })
     }
 
-    fn paint(
-        &mut self,
-        hdc: *mut core::ffi::c_void,
-        bounds: CellRect,
-        text_bounds: CellRect,
-        text: &str,
-        selected: bool,
-    ) -> bool {
+    fn paint(&mut self, request: &Request<'_>) -> bool {
         if self.ensure_target().is_err() {
             return false;
         }
         let Some(target) = self.target.clone() else {
             return false;
         };
-        let text_bounds = text_area(bounds, text_bounds);
-        let bound = windows::Win32::Foundation::RECT {
-            left: bounds.left,
-            top: bounds.top,
-            right: bounds.right,
-            bottom: bounds.bottom,
+        let Ok(format) = self.ensure_format(request.font, target_dpi(&target)) else {
+            return false;
         };
-        if unsafe { target.BindDC(HDC(hdc), &bound) }.is_err() {
+        let text_bounds = text_area(request.bounds, request.text_bounds);
+        let bound = windows::Win32::Foundation::RECT {
+            left: request.bounds.left,
+            top: request.bounds.top,
+            right: request.bounds.right,
+            bottom: request.bounds.bottom,
+        };
+        if unsafe { target.BindDC(HDC(request.hdc), &bound) }.is_err() {
             return false;
         }
         unsafe { target.BeginDraw() };
-        let drew = draw_cell(&target, &self.format, bounds, text_bounds, text, selected);
+        let drew = draw_cell(
+            &target,
+            &format,
+            request.bounds,
+            text_bounds,
+            request.text,
+            request.colors,
+        );
         match unsafe { target.EndDraw(None, None) } {
             Ok(()) => drew,
             Err(err) if err.code().0 == RECREATE_TARGET => {
@@ -177,6 +214,35 @@ impl Painter {
             }
         }
     }
+
+    fn ensure_format(
+        &mut self,
+        font: *mut core::ffi::c_void,
+        dpi: f32,
+    ) -> Result<IDWriteTextFormat, ()> {
+        let Some(key) = font_key(font, dpi) else {
+            return Err(());
+        };
+        if self.failed.as_ref() == Some(&key) {
+            return Err(());
+        }
+        if let Some((cached, format)) = &self.format {
+            if cached == &key {
+                return Ok(format.clone());
+            }
+        }
+        match text_format(&self.write, font, &key) {
+            Ok(format) => {
+                self.failed = None;
+                self.format = Some((key, format.clone()));
+                Ok(format)
+            }
+            Err(()) => {
+                self.failed = Some(key);
+                Err(())
+            }
+        }
+    }
 }
 
 fn draw_cell(
@@ -185,12 +251,14 @@ fn draw_cell(
     bounds: CellRect,
     text_bounds: CellRect,
     text: &str,
-    selected: bool,
+    colors: RowColors,
 ) -> bool {
-    let (background, foreground) = if selected {
-        (COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT)
-    } else {
-        (COLOR_WINDOW, COLOR_WINDOWTEXT)
+    // Inactive is the button face. That is the list view's unfocused selection
+    // (`COLOR_3DFACE` is the same index as `COLOR_BTNFACE`).
+    let (background, foreground) = match colors {
+        RowColors::Highlight => (COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT),
+        RowColors::Inactive => (COLOR_BTNFACE, COLOR_BTNTEXT),
+        RowColors::Window => (COLOR_WINDOW, COLOR_WINDOWTEXT),
     };
     let background = color_f(unsafe { GetSysColor(background) });
     let foreground = color_f(unsafe { GetSysColor(foreground) });
@@ -219,27 +287,117 @@ fn draw_cell(
     true
 }
 
-fn text_format(write: &IDWriteFactory) -> Result<IDWriteTextFormat, ()> {
-    for family in [w!("Segoe UI"), w!("Arial")] {
-        let Ok(format) = (unsafe {
-            write.CreateTextFormat(
-                family,
-                None::<&IDWriteFontCollection>,
-                DWRITE_FONT_WEIGHT_NORMAL,
-                DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_STRETCH_NORMAL,
-                12.0,
-                w!("en-us"),
-            )
-        }) else {
-            continue;
-        };
-        let _ = unsafe { format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING) };
-        let _ = unsafe { format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER) };
-        let _ = unsafe { format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP) };
-        return Ok(format);
+fn font_key(font: *mut core::ffi::c_void, dpi: f32) -> Option<FontKey> {
+    if dpi <= 0.0 {
+        return None;
     }
-    Err(())
+    let face = read_logfont(font)?;
+    if face.lfFaceName[0] == 0 {
+        return None;
+    }
+    let mut name = face.lfFaceName;
+    name[31] = 0;
+    let weight = if face.lfWeight <= 0 {
+        400
+    } else {
+        face.lfWeight
+    };
+    Some(FontKey {
+        face: name,
+        height: face.lfHeight,
+        weight,
+        italic: u8::from(face.lfItalic != 0),
+        dpi_bits: dpi.to_bits(),
+    })
+}
+
+fn read_logfont(font: *mut core::ffi::c_void) -> Option<LOGFONTW> {
+    if font.is_null() {
+        return None;
+    }
+    let mut face: LOGFONTW = unsafe { mem::zeroed() };
+    let wrote = unsafe {
+        GetObjectW(
+            font,
+            mem::size_of::<LOGFONTW>() as i32,
+            &mut face as *mut LOGFONTW as *mut core::ffi::c_void,
+        )
+    };
+    if wrote < mem::size_of::<LOGFONTW>() as i32 {
+        None
+    } else {
+        Some(face)
+    }
+}
+
+/// Positive `lfHeight` is the cell height. The em size is that height minus
+/// the font's internal leading.
+fn measured_cell_em(font: *mut core::ffi::c_void) -> Option<i32> {
+    let dc = unsafe { CreateCompatibleDC(ptr::null_mut()) };
+    if dc.is_null() {
+        return None;
+    }
+    let previous = unsafe { SelectObject(dc, font) };
+    let mut metrics: TEXTMETRICW = unsafe { mem::zeroed() };
+    let ok = unsafe { GetTextMetricsW(dc, &mut metrics) } != 0;
+    if !previous.is_null() {
+        unsafe {
+            SelectObject(dc, previous);
+        }
+    }
+    unsafe {
+        DeleteDC(dc);
+    }
+    if !ok {
+        return None;
+    }
+    let em = metrics.tmHeight.saturating_sub(metrics.tmInternalLeading);
+    (em > 0).then_some(em)
+}
+
+fn text_format(
+    write: &IDWriteFactory,
+    font: *mut core::ffi::c_void,
+    key: &FontKey,
+) -> Result<IDWriteTextFormat, ()> {
+    let em = negative_em(key.height)
+        .or_else(|| measured_cell_em(font))
+        .or_else(|| (key.height > 0).then_some(key.height))
+        .ok_or(())?;
+    let dpi = f32::from_bits(key.dpi_bits);
+    let size = dip_size(em, dpi).ok_or(())?;
+    let style = if key.italic != 0 {
+        DWRITE_FONT_STYLE_ITALIC
+    } else {
+        DWRITE_FONT_STYLE_NORMAL
+    };
+    let format = unsafe {
+        write.CreateTextFormat(
+            PCWSTR(key.face.as_ptr()),
+            None::<&IDWriteFontCollection>,
+            DWRITE_FONT_WEIGHT(key.weight),
+            style,
+            DWRITE_FONT_STRETCH_NORMAL,
+            size,
+            w!("en-us"),
+        )
+    }
+    .map_err(|_| ())?;
+    let _ = unsafe { format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING) };
+    let _ = unsafe { format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER) };
+    let _ = unsafe { format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP) };
+    Ok(format)
+}
+
+fn target_dpi(target: &ID2D1DCRenderTarget) -> f32 {
+    let mut x = 0.0f32;
+    let mut y = 0.0f32;
+    unsafe { target.GetDpi(&mut x, &mut y) };
+    if y > 0.0 {
+        y
+    } else {
+        96.0
+    }
 }
 
 fn create_target(factory: &ID2D1Factory) -> Result<ID2D1DCRenderTarget, ()> {
