@@ -18,6 +18,7 @@ mod panes;
 mod places;
 mod query;
 mod rows;
+mod tabs;
 mod timeout;
 mod tree;
 
