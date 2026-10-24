@@ -102,24 +102,37 @@ impl ThumbCache {
     /// The key is the full path string, with no canonicalization. A cached path returns a ticket
     /// that is already [`TryThumb::Ready`] and does not start a worker. A second request for a
     /// path that is queued or running returns a ticket for that same job and does not start
-    /// another worker. At [`thumb_pool_size`], the path is queued and [`ThumbTicket::try_recv`]
-    /// stays [`TryThumb::Pending`] until a slot frees. This method does not sleep and does not
+    /// another worker. A cancelled job is not reused: the next request starts another decode.
+    /// At [`thumb_pool_size`], the path is queued and [`ThumbTicket::try_recv`] stays
+    /// [`TryThumb::Pending`] until a slot frees. This method does not sleep and does not
     /// read `path`.
     pub fn request(&self, path: &str) -> ThumbTicket {
         let mut sched = lock(&self.inner.sched);
-        if let Some(job) = sched.jobs.get(path) {
-            let job = Arc::clone(job);
-            drop(sched);
-            return ThumbTicket::from_job(job);
-        }
-        if let Some(rgba) = sched.finished.get(path) {
-            let rgba = rgba.clone();
-            drop(sched);
-            return ThumbTicket::ready(path, rgba);
+        // A cancelled job stays in the map until its worker leaves the imaging call.
+        // Returning that ticket would make the next visit look finished. Replace it.
+        let replaced_cancelled = match sched.jobs.get(path) {
+            Some(job) if job.is_cancelled() => true,
+            Some(job) => {
+                let job = Arc::clone(job);
+                drop(sched);
+                return ThumbTicket::from_job(job);
+            }
+            None => false,
+        };
+        if !replaced_cancelled {
+            if let Some(rgba) = sched.finished.get(path) {
+                let rgba = rgba.clone();
+                drop(sched);
+                return ThumbTicket::ready(path, rgba);
+            }
         }
         let job = Job::new(path.to_string());
         sched.jobs.insert(path.to_string(), Arc::clone(&job));
-        let start_now = sched.active < self.inner.pool_size;
+        // The worker that is still inside the cancelled decode holds its pool slot.
+        // Queue so that worker picks this path up when it returns, instead of
+        // starting a second decode over the cap.
+        let start_now =
+            sched.active < self.inner.pool_size && !(replaced_cancelled && sched.active > 0);
         if start_now {
             sched.active += 1;
         } else {
@@ -329,6 +342,10 @@ impl Job {
             Phase::Cancelled => TryThumb::Cancelled,
         }
     }
+
+    fn is_cancelled(&self) -> bool {
+        matches!(*lock(&self.state), Phase::Cancelled)
+    }
 }
 
 impl std::fmt::Debug for CancelFlag {
@@ -366,7 +383,7 @@ fn spawn_worker(inner: Arc<Inner>, mut job: Arc<Job>) {
             }
             Err(_) => {
                 let _ = job.settle(Phase::Failed);
-                match next_job(&inner, &job.path) {
+                match next_job(&inner, &job) {
                     Some(next) => job = next,
                     None => return,
                 }
@@ -378,7 +395,7 @@ fn spawn_worker(inner: Arc<Inner>, mut job: Arc<Job>) {
 fn worker_loop(inner: Arc<Inner>, mut job: Arc<Job>) {
     loop {
         decode_job(&inner, &job);
-        match next_job(&inner, &job.path) {
+        match next_job(&inner, &job) {
             Some(next) => job = next,
             None => break,
         }
@@ -401,18 +418,31 @@ fn decode_job(inner: &Inner, job: &Job) {
     }
 }
 
-fn next_job(inner: &Inner, finished: &str) -> Option<Arc<Job>> {
+fn next_job(inner: &Inner, finished: &Arc<Job>) -> Option<Arc<Job>> {
     let mut sched = lock(&inner.sched);
-    sched.jobs.remove(finished);
+    // A newer request may already have replaced a cancelled job for this path.
+    if sched
+        .jobs
+        .get(&finished.path)
+        .is_some_and(|current| Arc::ptr_eq(current, finished))
+    {
+        sched.jobs.remove(&finished.path);
+    }
     while let Some(next) = sched.queue.pop_front() {
         if next.flag.is_cancelled() {
-            sched.jobs.remove(&next.path);
+            if sched
+                .jobs
+                .get(&next.path)
+                .is_some_and(|current| Arc::ptr_eq(current, &next))
+            {
+                sched.jobs.remove(&next.path);
+            }
             next.force_cancelled();
             continue;
         }
         return Some(next);
     }
-    sched.active -= 1;
+    sched.active = sched.active.saturating_sub(1);
     None
 }
 
@@ -681,6 +711,30 @@ mod tests {
         assert_eq!(second.try_recv(), TryThumb::Cancelled);
         assert_eq!(first.try_recv(), TryThumb::Cancelled);
         assert_eq!(book.started(), 1);
+    }
+
+    #[test]
+    fn request_after_cancel_decodes_the_path_again() {
+        let (book, cache) = scripted_cache([(r"C:\photos\a.png", vec![ScriptStep::Hang])]);
+        let first = cache.request(r"C:\photos\a.png");
+        wait_until(
+            || book.started() == 1,
+            Duration::from_secs(2),
+            "first decode",
+        );
+        first.cancel();
+        assert_eq!(first.try_recv(), TryThumb::Cancelled);
+
+        let second = cache.request(r"C:\photos\a.png");
+        let _guard = CancelOnDrop(&second);
+        assert!(!first.same_job(&second));
+        assert_eq!(second.try_recv(), TryThumb::Pending);
+        assert_eq!(first.try_recv(), TryThumb::Cancelled);
+        wait_until(
+            || book.started() == 2,
+            Duration::from_secs(2),
+            "decode after cancel",
+        );
     }
 
     #[test]
