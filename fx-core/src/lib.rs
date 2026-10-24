@@ -9,8 +9,9 @@ mod cancel;
 mod enumerate;
 mod kernel;
 mod network;
-pub mod shell;
+mod shell;
 mod source;
+pub mod thumbs;
 
 #[cfg(windows)]
 mod windows;

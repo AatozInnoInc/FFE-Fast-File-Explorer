@@ -9,6 +9,7 @@ mod columns;
 #[cfg(windows)]
 mod draw;
 mod icons;
+mod images;
 mod nav;
 mod places;
 mod rows;
