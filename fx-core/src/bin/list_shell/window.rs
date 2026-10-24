@@ -12,8 +12,12 @@
 //! pastes, renames, deletes, and opens properties. More options asks a helper
 //! process supervised by the watchdog. That helper returns no verbs and does
 //! not load a shell extension. A Timeout button stores the network timeout.
-//! Local volumes do not use it, and a timeout is not retried. A Network node
-//! stays collapsed until the user expands it.
+//! Local volumes do not use it, and a timeout is not retried. A search box
+//! stores typed text and does not rank on the keystroke. The timer copies
+//! settled local listings into the filename index and ranks those names. An
+//! empty or whitespace query leaves the directory listing in place. Names
+//! that later disappear stay indexed. A Network node stays collapsed until
+//! the user expands it.
 
 use std::collections::HashMap;
 use std::mem;
@@ -61,17 +65,19 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, KillTimer,
     LoadCursorW, MessageBoxW, MoveWindow, PostQuitMessage, RegisterClassW, SendMessageW, SetTimer,
     SetWindowLongPtrW, SetWindowTextW, ShowWindow, TrackPopupMenu, TranslateMessage, BN_CLICKED,
-    BS_PUSHBUTTON, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, ES_AUTOHSCROLL, GA_ROOT, GWLP_USERDATA,
-    GWL_STYLE, HMENU, IDC_ARROW, IDYES, MB_ICONWARNING, MB_YESNO, MF_SEPARATOR, MF_STRING, MSG,
-    SIZE_MINIMIZED, SM_CXSMICON, SM_CYSMICON, SW_SHOW, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_GETFONT, WM_KEYDOWN,
-    WM_NOTIFY, WM_SIZE, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN,
-    WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+    BS_PUSHBUTTON, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, EN_CHANGE, ES_AUTOHSCROLL, GA_ROOT,
+    GWLP_USERDATA, GWL_STYLE, HMENU, IDC_ARROW, IDYES, MB_ICONWARNING, MB_YESNO, MF_SEPARATOR,
+    MF_STRING, MSG, SIZE_MINIMIZED, SM_CXSMICON, SM_CYSMICON, SW_SHOW, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY,
+    WM_GETFONT, WM_KEYDOWN, WM_NOTIFY, WM_SIZE, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_BORDER,
+    WS_CHILD, WS_CLIPCHILDREN, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
 
+use fx_core::filename_index::{FilenameIndex, IndexRecord};
 use fx_core::helper::HelperSession;
 use fx_core::settings::TimeoutSetting;
 use fx_core::thumbs::{ThumbCache, ThumbTicket, TryThumb};
+use fx_core::VolumeKind;
 use fx_core::{EnumError, NetworkBrowse, NetworkPlace, OpenedDirectory, Path, Shell, VolumeId};
 
 use crate::cell;
@@ -83,6 +89,7 @@ use crate::icons::{icon_key, IconCache, IconKey};
 use crate::images;
 use crate::nav::{normalize_address, same_directory, tree_root, History, TreeRoot};
 use crate::places::{PlaceChange, PlaceList};
+use crate::query::Query;
 use crate::rows::{DirectoryRows, RowChange};
 use crate::timeout;
 use crate::tree::{child_directory, ChildChange, Expansion};
@@ -103,6 +110,11 @@ const ID_BACK: isize = 3;
 const ID_FORWARD: isize = 4;
 const ID_ADDRESS: isize = 5;
 const ID_TIMEOUT: isize = 6;
+const ID_SEARCH: isize = 7;
+/// Width of the search box. Not a performance budget.
+const SEARCH_WIDTH: i32 = 180;
+/// `EM_SETCUEBANNER`.
+const EM_SETCUEBANNER: u32 = 0x1501;
 /// Width of the Timeout button. Not a performance budget.
 const TIMEOUT_WIDTH: i32 = 84;
 const NETWORK_LABEL: &str = "Network";
@@ -145,6 +157,17 @@ struct ListWindow {
     timeout: HWND,
     /// `rapid-explorer-settings.txt` beside this executable.
     settings_file: std::path::PathBuf,
+    /// Search box. Typing does not rank; the timer does.
+    search: HWND,
+    query: Query,
+    /// Names this window has already listed. Eviction: TODO — define.
+    index: FilenameIndex,
+    /// Last directory copied into `index`.
+    indexed_path: String,
+    /// Ranked records while [`Query::is_active`].
+    search_hits: Vec<IndexRecord>,
+    /// Query text already ranked. Differs from [`Query::text`] until the timer runs.
+    search_applied: String,
 }
 
 struct ThumbJob {
@@ -405,6 +428,19 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
         ID_TIMEOUT,
         "timeout button",
     )?;
+    let search = create_control(
+        hwnd,
+        WC_EDITW,
+        "",
+        address_style(),
+        WS_EX_CLIENTEDGE,
+        ID_SEARCH,
+        "search box",
+    )?;
+    let cue = wide("Search");
+    unsafe {
+        SendMessageW(search, EM_SETCUEBANNER, 1, cue.as_ptr() as LPARAM);
+    }
 
     let root = start.root.clone();
     let polling = !start.rows.is_settled();
@@ -432,6 +468,12 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
         menu_host: None,
         timeout,
         settings_file: start.settings_file,
+        search,
+        query: Query::new(),
+        index: FilenameIndex::new(),
+        indexed_path: String::new(),
+        search_hits: Vec::new(),
+        search_applied: String::new(),
     });
     let shown = state.rows.shown().len();
     unsafe {
@@ -650,6 +692,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 fn on_command(hwnd: HWND, wparam: WPARAM) {
     let id = (wparam & 0xffff) as isize;
     let code = ((wparam >> 16) & 0xffff) as u32;
+    if id == ID_SEARCH && code == EN_CHANGE {
+        on_search_change(hwnd);
+        return;
+    }
     if code != BN_CLICKED {
         return;
     }
@@ -658,6 +704,106 @@ fn on_command(hwnd: HWND, wparam: WPARAM) {
         ID_FORWARD => go_forward(hwnd),
         ID_TIMEOUT => edit_timeout(hwnd),
         _ => {}
+    }
+}
+
+fn on_search_change(hwnd: HWND) {
+    let Some(search) = state_mut(hwnd).map(|state| state.search) else {
+        return;
+    };
+    let text = control_string(search);
+    let changed = state_mut(hwnd).is_some_and(|state| state.query.set(&text));
+    if changed {
+        ensure_timer(hwnd);
+    }
+}
+
+fn control_string(hwnd: HWND) -> String {
+    let len = unsafe { GetWindowTextLengthW(hwnd) };
+    if len <= 0 {
+        return String::new();
+    }
+    let mut buf = vec![0u16; len as usize + 1];
+    let copied = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+    if copied <= 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buf[..copied as usize])
+}
+
+fn index_listed(state: &mut ListWindow) {
+    if !state.rows.is_settled() || state.indexed_path == state.current {
+        return;
+    }
+    let volume = VolumeId::from_directory(&Path::new(state.current.clone()));
+    if volume.kind() == VolumeKind::Local {
+        for entry in state.rows.shown() {
+            if entry.name.is_empty() || entry.name == "." || entry.name == ".." {
+                continue;
+            }
+            let path = child_directory(&state.current, &entry.name);
+            state.index.upsert(IndexRecord {
+                path,
+                name: entry.name.clone(),
+                volume_key: volume.key().to_string(),
+                is_directory: entry.is_directory,
+                size: entry.size,
+                modified: entry.last_write,
+            });
+        }
+        state.search_applied.clear();
+    }
+    state.indexed_path = state.current.clone();
+}
+
+fn apply_search(state: &mut ListWindow) -> bool {
+    if state.query.text() == state.search_applied {
+        return false;
+    }
+    state.search_applied = state.query.text().to_string();
+    cancel_thumbs(state);
+    if state.query.is_active() {
+        state.search_hits = state
+            .index
+            .search(state.query.needle())
+            .into_iter()
+            .cloned()
+            .collect();
+    } else {
+        state.search_hits.clear();
+    }
+    true
+}
+
+fn visible_len(state: &ListWindow) -> usize {
+    if state.query.is_active() {
+        state.search_hits.len()
+    } else {
+        state.rows.shown().len()
+    }
+}
+
+fn visible_entry(state: &ListWindow, index: usize) -> Option<fx_core::FileEntry> {
+    if state.query.is_active() {
+        state.search_hits.get(index).map(file_entry_from_record)
+    } else {
+        state.rows.shown().get(index).cloned()
+    }
+}
+
+fn file_entry_from_record(record: &IndexRecord) -> fx_core::FileEntry {
+    fx_core::FileEntry {
+        name: record.name.clone(),
+        attributes: if record.is_directory {
+            FILE_ATTRIBUTE_DIRECTORY
+        } else {
+            FILE_ATTRIBUTE_NORMAL
+        },
+        size: record.size,
+        created: record.modified,
+        last_write: record.modified,
+        is_directory: record.is_directory,
+        is_reparse_point: false,
     }
 }
 
@@ -909,12 +1055,19 @@ fn on_timer(hwnd: HWND) {
     let Some(list) = list_handle(hwnd) else {
         return;
     };
-    let (change, shown, tree_changes, settled_nodes, idle, thumb_ready) = {
+    let (change, shown, tree_changes, settled_nodes, idle, thumb_ready, search_refreshed) = {
         let Some(state) = state_mut(hwnd) else {
             return;
         };
         let change = drain(state);
-        let shown = state.rows.shown().len();
+        index_listed(state);
+        let search_refreshed = apply_search(state);
+        let shown = visible_len(state);
+        let change = if state.query.is_active() {
+            RowChange::Unchanged
+        } else {
+            change
+        };
         let (tree_changes, settled_nodes) = drain_tree(state);
         let thumb_ready = poll_thumbs(state);
         let idle = state.pending.is_none()
@@ -922,6 +1075,7 @@ fn on_timer(hwnd: HWND) {
             && !thumbs_pending(state)
             && !file_op_pending(state)
             && !menu_host_pending(state)
+            && state.query.text() == state.search_applied
             && state
                 .nodes
                 .iter()
@@ -933,9 +1087,13 @@ fn on_timer(hwnd: HWND) {
             settled_nodes,
             idle,
             thumb_ready,
+            search_refreshed,
         )
     };
     paint(list, change, shown);
+    if search_refreshed {
+        set_count(list, shown);
+    }
     if thumb_ready {
         redraw_visible(list);
     }
@@ -1099,9 +1257,9 @@ fn on_list_dispinfo(hwnd: HWND, lparam: LPARAM) {
     let buffer = item.pszText;
     let capacity = item.cchTextMax;
     let row = state_mut(hwnd).and_then(|state| {
-        state.rows.shown().get(index).map(|entry| {
+        visible_entry(state, index).map(|entry| {
             let label = if wants_text {
-                columns::text(subitem, entry)
+                columns::text(subitem, &entry)
             } else {
                 String::new()
             };
@@ -1161,13 +1319,8 @@ fn paint_subitem(hwnd: HWND, list: HWND, draw: &NMLVCUSTOMDRAW) -> LRESULT {
         return CDRF_DODEFAULT as LRESULT;
     }
     let row = draw.nmcd.dwItemSpec;
-    let text = state_mut(hwnd).and_then(|state| {
-        state
-            .rows
-            .shown()
-            .get(row)
-            .map(|entry| columns::text(subitem, entry))
-    });
+    let text = state_mut(hwnd)
+        .and_then(|state| visible_entry(state, row).map(|entry| columns::text(subitem, &entry)));
     let Some(text) = text.filter(|text| !text.is_empty()) else {
         return CDRF_DODEFAULT as LRESULT;
     };
@@ -1279,6 +1432,13 @@ fn request_visible_thumb(hwnd: HWND, row: usize) {
 }
 
 fn thumb_path(state: &ListWindow, row: usize) -> Option<String> {
+    if state.query.is_active() {
+        let hit = state.search_hits.get(row)?;
+        if hit.is_directory || !images::wants_thumbnail(&hit.name) {
+            return None;
+        }
+        return Some(hit.path.clone());
+    }
     let entry = state.rows.shown().get(row)?;
     if entry.is_directory || !images::wants_thumbnail(&entry.name) {
         return None;
@@ -1433,19 +1593,23 @@ fn on_item_activate(hwnd: HWND, lparam: LPARAM) {
     if info.iItem < 0 {
         return;
     }
-    let Some((current, name)) = activated_directory(hwnd, info.iItem as usize) else {
+    let Some(path) = activated_directory(hwnd, info.iItem as usize) else {
         return;
     };
-    request_navigation(hwnd, child_directory(&current, &name), NavKind::Push);
+    request_navigation(hwnd, path, NavKind::Push);
 }
 
-fn activated_directory(hwnd: HWND, index: usize) -> Option<(String, String)> {
+fn activated_directory(hwnd: HWND, index: usize) -> Option<String> {
     let state = state_mut(hwnd)?;
+    if state.query.is_active() {
+        let hit = state.search_hits.get(index)?;
+        return hit.is_directory.then(|| hit.path.clone());
+    }
     let entry = state.rows.shown().get(index)?;
     if !entry.is_directory || entry.name.is_empty() {
         return None;
     }
-    Some((state.current.clone(), entry.name.clone()))
+    Some(child_directory(&state.current, &entry.name))
 }
 
 fn on_selection(hwnd: HWND, lparam: LPARAM) -> LRESULT {
@@ -1876,13 +2040,14 @@ fn fit_panes(hwnd: HWND) {
     let Some(list) = list_handle(hwnd) else {
         return;
     };
-    let Some((tree, back, forward, address, timeout)) = state_mut(hwnd).map(|state| {
+    let Some((tree, back, forward, address, timeout, search)) = state_mut(hwnd).map(|state| {
         (
             state.tree,
             state.back,
             state.forward,
             state.address,
             state.timeout,
+            state.search,
         )
     }) else {
         return;
@@ -1902,8 +2067,10 @@ fn fit_panes(hwnd: HWND) {
         MoveWindow(forward, forward_x, 0, FORWARD_WIDTH, NAV_HEIGHT, 1);
         let address_x = forward_x + FORWARD_WIDTH + NAV_GAP;
         let timeout_x = (width - TIMEOUT_WIDTH).max(address_x);
+        let search_x = (timeout_x - NAV_GAP - SEARCH_WIDTH).max(address_x);
+        MoveWindow(search, search_x, 0, SEARCH_WIDTH, NAV_HEIGHT, 1);
         MoveWindow(timeout, timeout_x, 0, TIMEOUT_WIDTH, NAV_HEIGHT, 1);
-        let address_width = (timeout_x - NAV_GAP - address_x).max(0);
+        let address_width = (search_x - NAV_GAP - address_x).max(0);
         MoveWindow(address, address_x, 0, address_width, NAV_HEIGHT, 1);
         let top = NAV_HEIGHT + NAV_GAP;
         let body = (height - top).max(0);
@@ -2061,6 +2228,9 @@ fn selected_paths(hwnd: HWND) -> Vec<String> {
             indexes
                 .into_iter()
                 .filter_map(|index| {
+                    if state.query.is_active() {
+                        return Some(state.search_hits.get(index)?.path.clone());
+                    }
                     let name = state.rows.shown().get(index)?.name.clone();
                     Some(child_directory(&state.current, &name))
                 })
@@ -2199,6 +2369,9 @@ fn properties_selection(hwnd: HWND) {
 }
 
 fn begin_rename(hwnd: HWND) {
+    if state_mut(hwnd).is_some_and(|state| state.query.is_active()) {
+        return;
+    }
     let Some(list) = list_handle(hwnd) else {
         return;
     };
@@ -2216,6 +2389,9 @@ fn on_end_label_edit(hwnd: HWND, lparam: LPARAM) -> LRESULT {
         return 0;
     }
     let new_name = control_text_from(item.pszText);
+    if state_mut(hwnd).is_some_and(|state| state.query.is_active()) {
+        return 0;
+    }
     let rename = state_mut(hwnd).and_then(|state| {
         let entry = state.rows.shown().get(item.iItem as usize)?;
         let accepted = commands::accepted_rename(&entry.name, &new_name)?;
