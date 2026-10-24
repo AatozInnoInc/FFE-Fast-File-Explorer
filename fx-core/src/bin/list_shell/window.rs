@@ -43,7 +43,7 @@ use windows_sys::Win32::UI::Controls::{
     WC_LISTVIEWW, WC_TREEVIEWW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    EnableWindow, SetFocus, VK_LEFT, VK_RETURN, VK_RIGHT,
+    EnableWindow, GetFocus, SetFocus, VK_LEFT, VK_RETURN, VK_RIGHT,
 };
 use windows_sys::Win32::UI::Shell::{
     SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_SMALLICON, SHGFI_USEFILEATTRIBUTES,
@@ -54,15 +54,16 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetWindowTextW, KillTimer, LoadCursorW, MoveWindow, PostQuitMessage, RegisterClassW,
     SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowTextW, ShowWindow, TranslateMessage,
     BN_CLICKED, BS_PUSHBUTTON, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, ES_AUTOHSCROLL, GA_ROOT,
-    GWLP_USERDATA, HMENU, IDC_ARROW, MSG, SIZE_MINIMIZED, SM_CXSMICON, SM_CYSMICON, SW_SHOW,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_DESTROY, WM_KEYDOWN, WM_NOTIFY, WM_SIZE,
-    WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN, WS_EX_CLIENTEDGE,
-    WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+    GWLP_USERDATA, GWL_STYLE, HMENU, IDC_ARROW, MSG, SIZE_MINIMIZED, SM_CXSMICON, SM_CYSMICON,
+    SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_DESTROY, WM_GETFONT, WM_KEYDOWN,
+    WM_NOTIFY, WM_SIZE, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN,
+    WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
 
 use fx_core::thumbs::{ThumbCache, ThumbTicket, TryThumb};
 use fx_core::{EnumError, NetworkBrowse, NetworkPlace, OpenedDirectory, Path, Shell, VolumeId};
 
+use crate::cell;
 use crate::columns;
 use crate::draw::{self, CellRect};
 use crate::icons::{icon_key, IconCache, IconKey};
@@ -1047,7 +1048,9 @@ fn on_list_dispinfo(hwnd: HWND, lparam: LPARAM) {
 
 /// Size and Date modified for rows the list view is painting. Subitem 0 stays
 /// with the control so the extension icon is still drawn. The tree's custom
-/// draw is ignored. The label is copied before DirectWrite runs.
+/// draw is ignored. The label is copied before DirectWrite runs. The cell uses
+/// the list view's font. A selected row uses the inactive colors when focus is
+/// in the tree or the address bar.
 fn on_custom_draw(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     let draw = unsafe { &*(lparam as *const NMLVCUSTOMDRAW) };
     let Some(list) = list_handle(hwnd) else {
@@ -1087,14 +1090,40 @@ fn paint_subitem(hwnd: HWND, list: HWND, draw: &NMLVCUSTOMDRAW) -> LRESULT {
     let Some(text) = text.filter(|text| !text.is_empty()) else {
         return CDRF_DODEFAULT as LRESULT;
     };
-    let selected = row_selected(list, row);
+    let colors = cell::selection(
+        row_selected(list, row),
+        list_focused(list),
+        show_sel_always(list),
+    );
     let bounds = cell_rect(draw.nmcd.rc);
     let text_bounds = cell_rect(draw.rcText);
-    if draw::paint_text(draw.nmcd.hdc, bounds, text_bounds, &text, selected) {
+    if draw::paint_text(
+        draw.nmcd.hdc,
+        list_font(list),
+        bounds,
+        text_bounds,
+        &text,
+        colors,
+    ) {
         CDRF_SKIPDEFAULT as LRESULT
     } else {
         CDRF_DODEFAULT as LRESULT
     }
+}
+
+fn list_focused(list: HWND) -> bool {
+    let focus = unsafe { GetFocus() };
+    focus == list
+}
+
+fn show_sel_always(list: HWND) -> bool {
+    let style = unsafe { GetWindowLongPtrW(list, GWL_STYLE) } as u32;
+    style & LVS_SHOWSELALWAYS != 0
+}
+
+/// The font the Name column is using. Null leaves the cell to the list view.
+fn list_font(list: HWND) -> *mut core::ffi::c_void {
+    unsafe { SendMessageW(list, WM_GETFONT, 0, 0) as *mut core::ffi::c_void }
 }
 
 fn row_selected(list: HWND, row: usize) -> bool {
