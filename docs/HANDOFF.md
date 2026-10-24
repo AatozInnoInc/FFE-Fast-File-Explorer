@@ -313,6 +313,12 @@ Implementation mapping: the HTML demo uses a `--sp` scale variable, Web Animatio
 
 **Completed prompt.** Two lists start at the same path. The left list is active. Other and F6 switch the active list and do not change either path. Clicking a list activates it and does not open a new listing. Each list uses `Shell::open`: a cache hit paints before poll, and a busy volume stays pending for the timer instead of blocking. The inactive list keeps its rows while the other list navigates. Search rows are drawn in the active list. An empty query leaves each pane's directory listing. There are no tabs. The filename index still does not read the disk. The UI thread does not enumerate. No IPC on the listing path, or C ABI. Questions 1–6 stay open. Eviction and the SSD budgets were not invented. The window was not launched from this environment.
 
+### 2026-10-24T23:40:00Z — Per-tab back and forward
+
+**Signed off by:** Grok 4.7, implementation pass.
+
+**Completed prompt.** Each tab keeps its own Back and Forward stack. Switching tabs restores that tab's path and does not push a history entry. A new tab starts with no Back. Closing a tab drops its history and does not merge it into the neighbor. The other pane stays as it is. The filename index still does not read the disk. The UI thread does not enumerate. No IPC on the listing path, or C ABI. Questions 1–6 stay open. Eviction and the SSD budgets were not invented. The window was not launched from this environment.
+
 ### 2026-10-24T23:20:00Z — Tabs on each pane
 
 **Signed off by:** Grok 4.7, implementation pass.
@@ -323,8 +329,8 @@ Implementation mapping: the HTML demo uses a `--sp` scale variable, Web Animatio
 
 ## 11. Prompt for Next Agent
 
-> `list_shell` lists a chosen directory through `fx_core::shell`. Each pane has tabs and one list. A new tab copies that pane's path. Choosing a tab lists that path. A cache hit paints before poll, and VolumeBusy does not block. The other pane stays as it is. Back and Forward still belong to the pane, not to the tab. Frecency is not applied. Do not add IPC or a C ABI on the listing path. Do not bypass `shell` with `ListingCache` or `enumerate`.
+> `list_shell` lists a chosen directory through `fx_core::shell`. Each pane has tabs and one list. Each tab has its own Back and Forward. Switching tabs does not push history. A cache hit paints before poll, and VolumeBusy does not block. The other pane stays as it is. Frecency is not applied. Do not add IPC or a C ABI on the listing path. Do not bypass `shell` with `ListingCache` or `enumerate`.
 >
-> Give each tab its own Back and Forward history. Switching tabs restores that tab's path and does not push a history entry. A new tab starts with no Back. Closing a tab drops its history and does not merge it into the neighbor. Do not add a third list.
+> Alt+D focuses the address bar and selects its text. Alt+Left and Alt+Right stay Back and Forward. Do not add a shortcut settings file in this slice.
 >
 > Do not read the USN journal in this slice. The filename index still does not read the disk. Do not decide questions 1–6. Do not invent an eviction size. SSD budgets are still unmeasured; do not invent those numbers. Reduced motion and the theme system are out of this slice.
