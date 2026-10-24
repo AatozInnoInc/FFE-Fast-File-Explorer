@@ -12,6 +12,7 @@ pub mod filename_index;
 pub mod helper;
 mod kernel;
 mod network;
+pub mod rank;
 pub mod settings;
 mod shell;
 mod source;
