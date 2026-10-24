@@ -1228,9 +1228,10 @@ fn overlay_thumb(hwnd: HWND, list: HWND, draw: &NMLVCUSTOMDRAW) -> LRESULT {
 }
 
 fn icon_rect(list: HWND, row: usize) -> Option<CellRect> {
+    // `left` is the `LVIR_*` portion and `top` is the subitem. Name is subitem 0.
     let mut rect = RECT {
-        left: columns::NAME,
-        top: LVIR_ICON as i32,
+        left: LVIR_ICON as i32,
+        top: columns::NAME,
         right: 0,
         bottom: 0,
     };
