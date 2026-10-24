@@ -57,8 +57,7 @@ use windows_sys::Win32::UI::Controls::{
     WC_LISTVIEWW, WC_TREEVIEWW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    EnableWindow, GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_F6, VK_LEFT, VK_MENU, VK_RETURN,
-    VK_RIGHT, VK_SHIFT, VK_T, VK_TAB, VK_W,
+    EnableWindow, GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_MENU, VK_RETURN, VK_SHIFT,
 };
 use windows_sys::Win32::UI::Shell::{
     SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_SMALLICON, SHGFI_USEFILEATTRIBUTES,
@@ -80,11 +79,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use fx_core::filename_index::{FilenameIndex, IndexRecord};
 use fx_core::helper::HelperSession;
 use fx_core::settings::TimeoutSetting;
+use fx_core::shortcuts::{Action, Chord, ShortcutMap};
 use fx_core::thumbs::{ThumbCache, ThumbTicket, TryThumb};
 use fx_core::VolumeKind;
 use fx_core::{EnumError, NetworkBrowse, NetworkPlace, OpenedDirectory, Path, Shell, VolumeId};
 
-use crate::address_focus::{focuses_address, Mods};
 use crate::cell;
 use crate::columns;
 use crate::commands::{self, Command};
@@ -134,8 +133,6 @@ const NM_SETFOCUS: u32 = 4294967289;
 const EM_SETCUEBANNER: u32 = 0x1501;
 /// `EM_SETSEL`. Select the whole address when Alt+D focuses it.
 const EM_SETSEL: u32 = 0x00B1;
-/// Virtual-key code for D.
-const VK_D: u16 = 0x44;
 /// Width of the Timeout button. Not a performance budget.
 const TIMEOUT_WIDTH: i32 = 84;
 const NETWORK_LABEL: &str = "Network";
@@ -174,6 +171,8 @@ struct ListWindow {
     other: HWND,
     /// `rapid-explorer-settings.txt` beside this executable.
     settings_file: std::path::PathBuf,
+    /// Built-in chords, plus overrides from `rapid-explorer-shortcuts.txt` when that file exists.
+    shortcuts: ShortcutMap,
     /// Search box. Typing does not rank; the timer does.
     search: HWND,
     query: Query,
@@ -527,6 +526,7 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
         menu_host: None,
         timeout,
         other,
+        shortcuts: load_shortcuts(&start.settings_file),
         settings_file: start.settings_file,
         search,
         query: Query::new(),
@@ -715,8 +715,9 @@ fn message_loop() -> ExitCode {
     }
 }
 
-/// Alt+Left, Alt+Right, and Enter in the address bar. The focused child would
-/// otherwise eat those keys. Enter is not dispatched, so the edit does not beep.
+/// Shortcuts from [`ShortcutMap`], plus Enter in the address bar. The focused
+/// child would otherwise eat those keys. Enter is not dispatched, so the edit
+/// does not beep. Enter is not a customizable chord.
 fn intercept(message: &MSG) -> bool {
     if message.hwnd.is_null() {
         return false;
@@ -725,55 +726,71 @@ fn intercept(message: &MSG) -> bool {
     if root.is_null() || state_mut(root).is_none() {
         return false;
     }
-    match message.message {
-        WM_SYSKEYDOWN => match message.wParam as u16 {
-            VK_LEFT => {
-                go_back(root);
-                true
-            }
-            VK_RIGHT => {
-                go_forward(root);
-                true
-            }
-            VK_D if focuses_address(
-                Mods {
-                    alt: true,
-                    ctrl: key_down(VK_CONTROL),
-                    shift: key_down(VK_SHIFT),
-                },
-                VK_D,
-            ) =>
-            {
-                focus_address(root);
-                true
-            }
-            _ => false,
-        },
-        WM_KEYDOWN if message.wParam == VK_F6 as WPARAM => {
-            toggle_pane(root);
-            true
-        }
-        WM_KEYDOWN if key_down(VK_CONTROL) && !key_down(VK_MENU) => match message.wParam as u16 {
-            VK_T if !key_repeat(message.lParam) => {
-                new_active_tab(root);
-                true
-            }
-            VK_W if !key_repeat(message.lParam) => {
-                close_active_tab(root);
-                true
-            }
-            VK_TAB => {
-                cycle_active_tab(root, key_down(VK_SHIFT));
-                true
-            }
-            _ => false,
-        },
-        WM_KEYDOWN if message.wParam == VK_RETURN as WPARAM && is_address(root, message.hwnd) => {
-            submit_address(root);
-            true
-        }
-        _ => false,
+    if message.message == WM_KEYDOWN
+        && message.wParam == VK_RETURN as WPARAM
+        && is_address(root, message.hwnd)
+    {
+        submit_address(root);
+        return true;
     }
+    let Some(chord) = message_chord(message) else {
+        return false;
+    };
+    let Some(action) = state_mut(root).and_then(|state| state.shortcuts.lookup(chord)) else {
+        return false;
+    };
+    if key_repeat(message.lParam) && matches!(action, Action::NewTab | Action::CloseTab) {
+        return true;
+    }
+    run_shortcut(root, action);
+    true
+}
+
+fn message_chord(message: &MSG) -> Option<Chord> {
+    if message.message != WM_KEYDOWN && message.message != WM_SYSKEYDOWN {
+        return None;
+    }
+    let virtual_key = message.wParam as u16;
+    if matches!(virtual_key, VK_SHIFT | VK_CONTROL | VK_MENU) {
+        return None;
+    }
+    Some(Chord {
+        ctrl: key_down(VK_CONTROL),
+        alt: key_down(VK_MENU),
+        shift: key_down(VK_SHIFT),
+        virtual_key,
+    })
+}
+
+fn run_shortcut(hwnd: HWND, action: Action) {
+    match action {
+        Action::Back => go_back(hwnd),
+        Action::Forward => go_forward(hwnd),
+        Action::FocusAddress => focus_address(hwnd),
+        Action::TogglePane => toggle_pane(hwnd),
+        Action::NewTab => new_active_tab(hwnd),
+        Action::CloseTab => close_active_tab(hwnd),
+        Action::NextTab => cycle_active_tab(hwnd, false),
+        Action::PreviousTab => cycle_active_tab(hwnd, true),
+        Action::Refresh => refresh_active(hwnd),
+    }
+}
+
+fn refresh_active(hwnd: HWND) {
+    let Some(path) =
+        state_mut(hwnd).map(|state| pane_ref(state, state.panes.active()).current.clone())
+    else {
+        return;
+    };
+    request_navigation(hwnd, path, NavKind::Refresh);
+}
+
+fn load_shortcuts(settings_file: &std::path::Path) -> ShortcutMap {
+    let path = settings_file
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new(""))
+        .join("rapid-explorer-shortcuts.txt");
+    ShortcutMap::load(&path).unwrap_or_else(|_| ShortcutMap::builtin())
 }
 
 fn is_address(hwnd: HWND, candidate: HWND) -> bool {

@@ -42,6 +42,7 @@ The next substantial capability step.
 - [x] Tabs. Each pane has its own tab strip. A new tab copies that pane's path. Choosing a tab lists it through the shell cache-hit and VolumeBusy rules and does not change the other pane. There is no third list — `done`
 - [x] Per-tab Back and Forward. Switching tabs does not push history. A new tab starts with no Back. Closing a tab drops that stack — `done`
 - [x] Alt+D focuses the address bar and selects its text. Alt+Left and Alt+Right stay Back and Forward — `done`
+- [x] Customize every keyboard shortcut. Built-in chords stay until the user changes them. A missing `rapid-explorer-shortcuts.txt` stays missing. Enter in the address bar is not a customizable chord — `done`
 
 ## Future / parking lot
 
