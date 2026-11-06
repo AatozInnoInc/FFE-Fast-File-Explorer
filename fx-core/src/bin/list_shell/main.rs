@@ -6,6 +6,7 @@
 
 mod address_focus;
 mod cell;
+mod closed_tabs;
 mod column_sort;
 mod columns;
 mod commands;
