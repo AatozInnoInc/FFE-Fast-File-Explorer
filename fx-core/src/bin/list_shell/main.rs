@@ -6,6 +6,7 @@
 
 mod address_focus;
 mod cell;
+mod column_sort;
 mod columns;
 mod commands;
 #[cfg(windows)]

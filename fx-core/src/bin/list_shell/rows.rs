@@ -8,6 +8,8 @@
 
 use fx_core::{FileEntry, ListingEvent, TryEvent};
 
+use crate::column_sort::{sort_entries, RowSort};
+
 /// What the owner-data control needs after one or more listing events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowChange {
@@ -51,6 +53,11 @@ impl DirectoryRows {
 
     pub fn shown(&self) -> &[FileEntry] {
         &self.shown
+    }
+
+    /// Sort the rows already listed. Incoming batches stay in arrival order until they are shown.
+    pub fn sort_shown(&mut self, sort: RowSort) {
+        sort_entries(&mut self.shown, sort);
     }
 
     pub fn is_settled(&self) -> bool {
