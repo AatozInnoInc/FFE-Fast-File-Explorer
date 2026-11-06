@@ -313,6 +313,12 @@ Implementation mapping: the HTML demo uses a `--sp` scale variable, Web Animatio
 
 **Completed prompt.** Two lists start at the same path. The left list is active. Other and F6 switch the active list and do not change either path. Clicking a list activates it and does not open a new listing. Each list uses `Shell::open`: a cache hit paints before poll, and a busy volume stays pending for the timer instead of blocking. The inactive list keeps its rows while the other list navigates. Search rows are drawn in the active list. An empty query leaves each pane's directory listing. There are no tabs. The filename index still does not read the disk. The UI thread does not enumerate. No IPC on the listing path, or C ABI. Questions 1–6 stay open. Eviction and the SSD budgets were not invented. The window was not launched from this environment.
 
+### 2026-10-25T00:20:00Z — Not responding
+
+**Signed off by:** Grok 4.7, implementation pass.
+
+**Completed prompt.** A timed-out pane shows "Not responding" on its own label. A busy volume does not. Finished clears the notice. Cancel, failure, and a batch leave it. There is no auto-retry. The other pane is unchanged. The filename index still does not read the disk. Questions 1–6 stay open. The window was not launched from this environment.
+
 ### 2026-10-25T00:05:00Z — Shortcut overrides
 
 **Signed off by:** Grok 4.7, implementation pass.
@@ -343,6 +349,6 @@ Implementation mapping: the HTML demo uses a `--sp` scale variable, Web Animatio
 
 > `list_shell` lists a chosen directory through `fx_core::shell`. Each pane has tabs and one list. Each tab has its own Back and Forward. Switching tabs does not push history. A cache hit paints before poll, and VolumeBusy does not block. The other pane stays as it is. Frecency is not applied. Do not add IPC or a C ABI on the listing path. Do not bypass `shell` with `ListingCache` or `enumerate`.
 >
-> When a listing times out, that pane shows "Not responding" and does not auto-retry. A busy volume does not show that notice. A finished listing clears it. The other pane is unchanged.
+> Up and Alt+Up move the active pane to its parent directory. A drive root and a UNC share root stay where they are. The parent is computed from the path text and does not read the disk. Alt+Up is a shortcut, defaulting to that chord.
 >
 > Do not read the USN journal in this slice. The filename index still does not read the disk. Do not decide questions 1–6. Do not invent an eviction size. SSD budgets are still unmeasured; do not invent those numbers. Reduced motion and the theme system are out of this slice.

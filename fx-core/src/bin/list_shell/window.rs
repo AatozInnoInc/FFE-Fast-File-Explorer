@@ -54,7 +54,7 @@ use windows_sys::Win32::UI::Controls::{
     TVINSERTSTRUCTW_0, TVITEMW, TVI_LAST, TVI_ROOT, TVM_DELETEITEM, TVM_INSERTITEMW,
     TVM_SELECTITEM, TVM_SETITEMW, TVN_ITEMEXPANDINGW, TVN_SELCHANGEDW, TVS_DISABLEDRAGDROP,
     TVS_HASBUTTONS, TVS_HASLINES, TVS_LINESATROOT, TVS_SHOWSELALWAYS, WC_BUTTONW, WC_EDITW,
-    WC_LISTVIEWW, WC_TREEVIEWW,
+    WC_LISTVIEWW, WC_STATICW, WC_TREEVIEWW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_MENU, VK_RETURN, VK_SHIFT,
@@ -70,10 +70,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SetWindowLongPtrW, SetWindowTextW, ShowWindow, TrackPopupMenu, TranslateMessage, BN_CLICKED,
     BS_PUSHBUTTON, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, EN_CHANGE, ES_AUTOHSCROLL, GA_ROOT,
     GWLP_USERDATA, GWL_STYLE, HMENU, IDC_ARROW, IDYES, MB_ICONWARNING, MB_YESNO, MF_SEPARATOR,
-    MF_STRING, MSG, SIZE_MINIMIZED, SM_CXSMICON, SM_CYSMICON, SW_SHOW, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY,
-    WM_GETFONT, WM_KEYDOWN, WM_NOTIFY, WM_SIZE, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_BORDER,
-    WS_CHILD, WS_CLIPCHILDREN, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+    MF_STRING, MSG, SIZE_MINIMIZED, SM_CXSMICON, SM_CYSMICON, SW_HIDE, SW_SHOW, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_GETFONT, WM_KEYDOWN, WM_NOTIFY,
+    WM_SIZE, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN,
+    WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
 
 use fx_core::filename_index::{FilenameIndex, IndexRecord};
@@ -92,6 +92,7 @@ use crate::file_ops::{self, FileOp, Op};
 use crate::icons::{icon_key, IconCache, IconKey};
 use crate::images;
 use crate::nav::{normalize_address, same_directory, tree_root, TreeRoot};
+use crate::pane_notice::{notice_on_listing, notice_on_open_error, NoticeUpdate, PaneNotice};
 use crate::panes::{PaneId, Panes};
 use crate::places::{PlaceChange, PlaceList};
 use crate::query::Query;
@@ -121,6 +122,17 @@ const ID_ADDRESS: isize = 5;
 const ID_TIMEOUT: isize = 6;
 const ID_SEARCH: isize = 7;
 const ID_OTHER: isize = 9;
+const ID_NOTICE_LEFT: isize = 12;
+const ID_NOTICE_RIGHT: isize = 13;
+const NOTICE_HEIGHT: i32 = 18;
+/// `SS_LEFT`. Text starts at the left of the static control.
+const SS_LEFT: WINDOW_STYLE = 0x0000;
+/// `SS_CENTERIMAGE`. The single line sits in the vertical middle.
+const SS_CENTERIMAGE: WINDOW_STYLE = 0x0200;
+/// `SS_ENDELLIPSIS`. A long path ends with "...".
+const SS_ENDELLIPSIS: WINDOW_STYLE = 0x4000;
+/// `SS_NOPREFIX`. An `&` in a path is not an accelerator.
+const SS_NOPREFIX: WINDOW_STYLE = 0x0080;
 /// `TCN_SELCHANGE`. The tab strip sends this after the selection moves.
 const TCN_SELCHANGE: u32 = 0xFFFF_FDD9;
 /// Width of the search box. Not a performance budget.
@@ -202,6 +214,10 @@ struct PaneView {
     tabs: PaneTabs,
     /// Tab strip above this pane's list.
     tab_strip: HWND,
+    /// Shown only after this pane's listing times out.
+    notice: Option<PaneNotice>,
+    /// Static text under the tab strip. Hidden while [`Self::notice`] is clear.
+    notice_label: HWND,
 }
 
 struct ThumbJob {
@@ -472,6 +488,28 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
     )?;
     let left_tabs = tab_strip::create(hwnd, tab_strip::ID_TABS_LEFT)?;
     let right_tabs = tab_strip::create(hwnd, tab_strip::ID_TABS_RIGHT)?;
+    let left_notice = create_control(
+        hwnd,
+        WC_STATICW,
+        "",
+        notice_style(),
+        0,
+        ID_NOTICE_LEFT,
+        "left notice",
+    )?;
+    let right_notice = create_control(
+        hwnd,
+        WC_STATICW,
+        "",
+        notice_style(),
+        0,
+        ID_NOTICE_RIGHT,
+        "right notice",
+    )?;
+    unsafe {
+        ShowWindow(left_notice, SW_HIDE);
+        ShowWindow(right_notice, SW_HIDE);
+    }
     let cue = wide("Search");
     unsafe {
         SendMessageW(search, EM_SETCUEBANNER, 1, cue.as_ptr() as LPARAM);
@@ -495,6 +533,8 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
             indexed_path: String::new(),
             tabs: PaneTabs::start(root.clone()),
             tab_strip: left_tabs,
+            notice: None,
+            notice_label: left_notice,
         },
         right: PaneView {
             list: right_list,
@@ -510,6 +550,8 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
             indexed_path: String::new(),
             tabs: PaneTabs::start(root.clone()),
             tab_strip: right_tabs,
+            notice: None,
+            notice_label: right_notice,
         },
         tree,
         back,
@@ -1066,11 +1108,14 @@ fn try_pane_pending(hwnd: HWND, id: PaneId) {
                 update_nav_buttons(hwnd);
             }
         }
-        Err(EnumError::VolumeBusy) => ensure_timer(hwnd),
-        Err(_) => {
-            if let Some(state) = state_mut(hwnd) {
+        Err(err) => {
+            let update = notice_on_open_error(&err);
+            if matches!(err, EnumError::VolumeBusy) {
+                ensure_timer(hwnd);
+            } else if let Some(state) = state_mut(hwnd) {
                 pane_mut(state, id).pending = None;
             }
+            apply_notice(hwnd, id, update);
         }
     }
 }
@@ -1346,6 +1391,8 @@ fn on_timer(hwnd: HWND) {
         let (tree_changes, settled_nodes) = drain_tree(state);
         let left_thumbs = poll_pane_thumbs(&mut state.left);
         let right_thumbs = poll_pane_thumbs(&mut state.right);
+        let left_terminal = state.left.rows.take_terminal();
+        let right_terminal = state.right.rows.take_terminal();
         let idle = state.left.pending.is_none()
             && state.right.pending.is_none()
             && state.left.rows.is_settled()
@@ -1374,6 +1421,8 @@ fn on_timer(hwnd: HWND) {
             left_thumbs,
             right_thumbs,
             search_refreshed,
+            left_terminal,
+            right_terminal,
         )
     };
     let (
@@ -1391,7 +1440,15 @@ fn on_timer(hwnd: HWND) {
         left_thumbs,
         right_thumbs,
         search_refreshed,
+        left_terminal,
+        right_terminal,
     ) = painted;
+    if let Some(event) = left_terminal {
+        apply_notice(hwnd, PaneId::Left, notice_on_listing(&event));
+    }
+    if let Some(event) = right_terminal {
+        apply_notice(hwnd, PaneId::Right, notice_on_listing(&event));
+    }
     let (active_list, active_rows, inactive_list, inactive_rows, active_change, inactive_change) =
         match active {
             PaneId::Left => (
@@ -1534,7 +1591,61 @@ fn drain_pane(pane: &mut PaneView) -> RowChange {
         rows.stop();
         return RowChange::Unchanged;
     };
-    rows.apply_available(|| opened.poll())
+    let mut timed_out = false;
+    let change = rows.apply_available(|| match opened.poll() {
+        Err(EnumError::TimedOut) => {
+            timed_out = true;
+            Err(())
+        }
+        other => other.map_err(|_| ()),
+    });
+    if timed_out {
+        rows.note_timeout();
+    }
+    change
+}
+
+fn apply_notice(hwnd: HWND, id: PaneId, update: NoticeUpdate) {
+    let Some((label, next, changed)) = state_mut(hwnd).map(|state| {
+        let pane = pane_mut(state, id);
+        let changed = match update {
+            NoticeUpdate::Set(notice) => pane.notice != Some(notice),
+            NoticeUpdate::Clear => pane.notice.is_some(),
+            NoticeUpdate::Keep => false,
+        };
+        match update {
+            NoticeUpdate::Set(notice) => pane.notice = Some(notice),
+            NoticeUpdate::Clear => pane.notice = None,
+            NoticeUpdate::Keep => {}
+        }
+        (pane.notice_label, pane.notice, changed)
+    }) else {
+        return;
+    };
+    match next {
+        Some(notice) => {
+            set_control_text(label, notice.label());
+            unsafe { ShowWindow(label, SW_SHOW) };
+        }
+        None => unsafe {
+            ShowWindow(label, SW_HIDE);
+        },
+    }
+    if changed {
+        fit_panes(hwnd);
+    }
+}
+
+fn notice_band(notice: Option<PaneNotice>) -> i32 {
+    if notice.is_some() {
+        NOTICE_HEIGHT
+    } else {
+        0
+    }
+}
+
+fn notice_style() -> WINDOW_STYLE {
+    WS_CHILD | SS_LEFT | SS_CENTERIMAGE | SS_ENDELLIPSIS | SS_NOPREFIX
 }
 
 fn paint(list: HWND, change: RowChange, shown: usize) {
@@ -2425,6 +2536,10 @@ fn fit_panes(hwnd: HWND) {
         right,
         left_tabs,
         right_tabs,
+        left_notice,
+        right_notice,
+        left_notice_height,
+        right_notice_height,
     )) = state_mut(hwnd).map(|state| {
         (
             state.tree,
@@ -2438,6 +2553,10 @@ fn fit_panes(hwnd: HWND) {
             state.right.list,
             state.left.tab_strip,
             state.right.tab_strip,
+            state.left.notice_label,
+            state.right.notice_label,
+            notice_band(state.left.notice),
+            notice_band(state.right.notice),
         )
     })
     else {
@@ -2472,14 +2591,48 @@ fn fit_panes(hwnd: HWND) {
         let left_width = lists / 2;
         let right_width = lists - left_width;
         let tab_height = tab_strip::TAB_HEIGHT;
-        let list_top = top + tab_height;
-        let list_body = (body - tab_height).max(0);
         MoveWindow(tree, 0, top, tree_width, body, 1);
         MoveWindow(left_tabs, tree_width, top, left_width, tab_height, 1);
-        MoveWindow(left, tree_width, list_top, left_width, list_body, 1);
+        let left_notice_top = top + tab_height;
+        MoveWindow(
+            left_notice,
+            tree_width,
+            left_notice_top,
+            left_width,
+            left_notice_height,
+            1,
+        );
+        let left_list_top = left_notice_top + left_notice_height;
+        let left_list_body = (body - tab_height - left_notice_height).max(0);
+        MoveWindow(
+            left,
+            tree_width,
+            left_list_top,
+            left_width,
+            left_list_body,
+            1,
+        );
         let right_x = tree_width + left_width + NAV_GAP;
         MoveWindow(right_tabs, right_x, top, right_width, tab_height, 1);
-        MoveWindow(right, right_x, list_top, right_width, list_body, 1);
+        let right_notice_top = top + tab_height;
+        MoveWindow(
+            right_notice,
+            right_x,
+            right_notice_top,
+            right_width,
+            right_notice_height,
+            1,
+        );
+        let right_list_top = right_notice_top + right_notice_height;
+        let right_list_body = (body - tab_height - right_notice_height).max(0);
+        MoveWindow(
+            right,
+            right_x,
+            right_list_top,
+            right_width,
+            right_list_body,
+            1,
+        );
         size_columns(left, left_width);
         size_columns(right, right_width);
     }
