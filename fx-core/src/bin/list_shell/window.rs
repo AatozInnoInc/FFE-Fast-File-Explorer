@@ -91,11 +91,12 @@ use crate::draw::{self, CellRect};
 use crate::file_ops::{self, FileOp, Op};
 use crate::icons::{icon_key, IconCache, IconKey};
 use crate::images;
-use crate::nav::{normalize_address, same_directory, tree_root, History, TreeRoot};
+use crate::nav::{normalize_address, same_directory, tree_root, TreeRoot};
 use crate::panes::{PaneId, Panes};
 use crate::places::{PlaceChange, PlaceList};
 use crate::query::Query;
 use crate::rows::{DirectoryRows, RowChange};
+use crate::tab_history::TabHistories;
 use crate::tab_strip;
 use crate::tabs::PaneTabs;
 use crate::timeout;
@@ -182,7 +183,7 @@ struct ListWindow {
 /// One list, its history, and the listing it is showing.
 struct PaneView {
     list: HWND,
-    history: History,
+    history: TabHistories,
     /// Directory whose rows are on screen. Unchanged until a navigation opens.
     current: String,
     /// A path whose volume worker was busy. The timer retries it. The list stays.
@@ -236,6 +237,8 @@ enum NavKind {
     Forward,
     /// Re-list the current directory after a file operation. Does not push history.
     Refresh,
+    /// Show a path this tab already remembers. Does not push history.
+    Restore,
 }
 
 #[derive(Clone)]
@@ -479,7 +482,7 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
         panes: Panes::start(root.clone()),
         left: PaneView {
             list,
-            history: History::start(root.clone()),
+            history: TabHistories::start(root.clone()),
             current: root.clone(),
             pending: None,
             opened: start.opened,
@@ -491,7 +494,7 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
         },
         right: PaneView {
             list: right_list,
-            history: History::start(root.clone()),
+            history: TabHistories::start(root.clone()),
             current: root.clone(),
             pending: Some(PendingNav {
                 path: root.clone(),
@@ -1049,9 +1052,9 @@ fn commit_history(pane: &mut PaneView, pending: &PendingNav) {
         NavKind::Forward => {
             let _ = pane.history.forward();
         }
-        NavKind::Refresh => {}
+        NavKind::Refresh | NavKind::Restore => {}
     }
-    pane.tabs.set_active_path(&pending.path);
+    pane.tabs.set_active_path(pane.history.current());
 }
 
 fn present_directory(hwnd: HWND, id: PaneId, path: &str, mut opened: OpenedDirectory) {
@@ -3055,7 +3058,9 @@ fn new_active_tab(hwnd: HWND) {
         return;
     };
     if let Some(state) = state_mut(hwnd) {
-        let _ = pane_mut(state, id).tabs.new_tab();
+        let pane = pane_mut(state, id);
+        let _ = pane.history.new_tab();
+        let _ = pane.tabs.new_tab();
     }
     refill_tabs(hwnd, id);
 }
@@ -3064,15 +3069,18 @@ fn close_active_tab(hwnd: HWND) {
     let Some(id) = state_mut(hwnd).map(|state| state.panes.active()) else {
         return;
     };
-    let Some(path) = state_mut(hwnd)
-        .and_then(|state| pane_mut(state, id).tabs.close_active().map(str::to_string))
-    else {
+    let Some(path) = state_mut(hwnd).and_then(|state| {
+        let pane = pane_mut(state, id);
+        let path = pane.history.close_active().map(str::to_string)?;
+        let _ = pane.tabs.close_active();
+        Some(path)
+    }) else {
         return;
     };
     refill_tabs(hwnd, id);
     let current = state_mut(hwnd).map(|state| pane_ref(state, id).current.clone());
     if current.as_deref() != Some(path.as_str()) {
-        request_navigation(hwnd, path, NavKind::Push);
+        request_navigation(hwnd, path, NavKind::Restore);
     }
 }
 
@@ -3103,14 +3111,17 @@ fn cycle_active_tab(hwnd: HWND, backward: bool) {
 }
 
 fn choose_tab(hwnd: HWND, id: PaneId, index: usize) {
-    let Some(path) = state_mut(hwnd)
-        .and_then(|state| pane_mut(state, id).tabs.select(index).map(str::to_string))
-    else {
+    let Some(path) = state_mut(hwnd).and_then(|state| {
+        let pane = pane_mut(state, id);
+        let path = pane.history.select(index).map(str::to_string)?;
+        let _ = pane.tabs.select(index);
+        Some(path)
+    }) else {
         return;
     };
     refill_tabs(hwnd, id);
     activate_pane(hwnd, id);
-    request_navigation(hwnd, path, NavKind::Push);
+    request_navigation(hwnd, path, NavKind::Restore);
 }
 
 fn on_tab_change(hwnd: HWND, lparam: LPARAM) {
