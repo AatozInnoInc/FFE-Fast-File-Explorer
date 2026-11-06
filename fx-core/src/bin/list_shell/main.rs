@@ -22,6 +22,7 @@ mod panes;
 mod parent_path;
 mod places;
 mod query;
+mod reparse_mark;
 mod rows;
 mod tab_history;
 #[cfg(windows)]
