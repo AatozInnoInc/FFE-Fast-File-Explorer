@@ -70,10 +70,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SetWindowLongPtrW, SetWindowTextW, ShowWindow, TrackPopupMenu, TranslateMessage, BN_CLICKED,
     BS_PUSHBUTTON, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, EN_CHANGE, ES_AUTOHSCROLL, GA_ROOT,
     GWLP_USERDATA, GWL_STYLE, HMENU, IDC_ARROW, IDYES, MB_ICONWARNING, MB_YESNO, MF_SEPARATOR,
-    MF_STRING, MSG, SIZE_MINIMIZED, SM_CXSMICON, SM_CYSMICON, SW_HIDE, SW_SHOW, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_GETFONT, WM_KEYDOWN, WM_NOTIFY,
-    WM_SIZE, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN,
-    WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+    MF_STRING, MSG, SIZE_MINIMIZED, SM_CXSMICON, SM_CYSMICON, SW_HIDE, SW_SHOW, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY,
+    WM_GETFONT, WM_KEYDOWN, WM_NOTIFY, WM_SIZE, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_BORDER,
+    WS_CHILD, WS_CLIPCHILDREN, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
 
 use fx_core::filename_index::{FilenameIndex, IndexRecord};
@@ -94,6 +94,7 @@ use crate::images;
 use crate::nav::{normalize_address, same_directory, tree_root, TreeRoot};
 use crate::pane_notice::{notice_on_listing, notice_on_open_error, NoticeUpdate, PaneNotice};
 use crate::panes::{PaneId, Panes};
+use crate::parent_path::parent_directory;
 use crate::places::{PlaceChange, PlaceList};
 use crate::query::Query;
 use crate::rows::{DirectoryRows, RowChange};
@@ -815,7 +816,20 @@ fn run_shortcut(hwnd: HWND, action: Action) {
         Action::NextTab => cycle_active_tab(hwnd, false),
         Action::PreviousTab => cycle_active_tab(hwnd, true),
         Action::Refresh => refresh_active(hwnd),
+        Action::Parent => go_parent(hwnd),
     }
+}
+
+fn go_parent(hwnd: HWND) {
+    let Some(path) =
+        state_mut(hwnd).map(|state| pane_ref(state, state.panes.active()).current.clone())
+    else {
+        return;
+    };
+    let Some(parent) = parent_directory(&path) else {
+        return;
+    };
+    request_navigation(hwnd, parent, NavKind::Push);
 }
 
 fn refresh_active(hwnd: HWND) {
