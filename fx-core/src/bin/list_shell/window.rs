@@ -32,7 +32,9 @@ use windows_sys::core::w;
 use windows_sys::Win32::Foundation::{
     GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
-use windows_sys::Win32::Graphics::Gdi::{ScreenToClient, UpdateWindow, COLOR_WINDOW, HBRUSH};
+use windows_sys::Win32::Graphics::Gdi::{
+    CreateSolidBrush, DeleteObject, FillRect, ScreenToClient, UpdateWindow, COLOR_WINDOW, HBRUSH,
+};
 use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
 use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -99,6 +101,7 @@ use crate::panes::{PaneId, Panes};
 use crate::parent_path::parent_directory;
 use crate::places::{PlaceChange, PlaceList};
 use crate::query::Query;
+use crate::reparse_mark::{reparse_badge, shows_reparse_badge};
 use crate::rows::{DirectoryRows, RowChange};
 use crate::tab_history::TabHistories;
 use crate::tab_strip;
@@ -2009,14 +2012,45 @@ fn overlay_thumb(hwnd: HWND, list: HWND, draw: &NMLVCUSTOMDRAW) -> LRESULT {
             _ => None,
         }
     });
-    let Some(rgba) = rgba else {
-        return CDRF_DODEFAULT as LRESULT;
-    };
-    let Some(bounds) = icon_rect(list, row) else {
-        return CDRF_DODEFAULT as LRESULT;
-    };
-    let _ = draw::paint_bitmap(draw.nmcd.hdc, bounds, rgba.width, rgba.height, &rgba.pixels);
+    if let Some(rgba) = rgba {
+        if let Some(bounds) = icon_rect(list, row) {
+            let _ =
+                draw::paint_bitmap(draw.nmcd.hdc, bounds, rgba.width, rgba.height, &rgba.pixels);
+        }
+    }
+    paint_reparse_badge(hwnd, list, row, draw.nmcd.hdc);
     CDRF_DODEFAULT as LRESULT
+}
+
+/// A small square on the name icon when the row is a reparse point.
+/// Search hits are not reparse points. This does not load an overlay handler.
+fn paint_reparse_badge(hwnd: HWND, list: HWND, row: usize, hdc: *mut core::ffi::c_void) {
+    let reparse = state_mut(hwnd).is_some_and(|state| {
+        visible_entry(state, list, row)
+            .is_some_and(|entry| shows_reparse_badge(entry.is_reparse_point))
+    });
+    if !reparse {
+        return;
+    }
+    let Some(bounds) = icon_rect(list, row) else {
+        return;
+    };
+    let Some(badge) = reparse_badge(bounds.left, bounds.top, bounds.right, bounds.bottom) else {
+        return;
+    };
+    let rect = RECT {
+        left: badge.left,
+        top: badge.top,
+        right: badge.right,
+        bottom: badge.bottom,
+    };
+    unsafe {
+        let brush = CreateSolidBrush(0x0000_80FF);
+        if !brush.is_null() {
+            FillRect(hdc, &rect, brush);
+            let _ = DeleteObject(brush);
+        }
+    }
 }
 
 fn icon_rect(list: HWND, row: usize) -> Option<CellRect> {

@@ -47,6 +47,7 @@ The next substantial capability step.
 - [x] Up and Alt+Up open the parent directory of the active pane. Drive roots and UNC share roots stay put. The parent comes from the path text — `done`
 - [x] Column headers sort the rows already listed by name, size, or date modified. Equal keys keep their order. Search hits are not sorted — `done`
 - [x] A tree child whose path text repeats the node or an ancestor is not inserted. Reparse targets are not followed — `done`
+- [x] A reparse point draws a small square on its name icon. Search hits do not. There is no shell overlay — `done`
 
 ## Future / parking lot
 
