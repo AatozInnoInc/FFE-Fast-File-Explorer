@@ -313,6 +313,12 @@ Implementation mapping: the HTML demo uses a `--sp` scale variable, Web Animatio
 
 **Completed prompt.** Two lists start at the same path. The left list is active. Other and F6 switch the active list and do not change either path. Clicking a list activates it and does not open a new listing. Each list uses `Shell::open`: a cache hit paints before poll, and a busy volume stays pending for the timer instead of blocking. The inactive list keeps its rows while the other list navigates. Search rows are drawn in the active list. An empty query leaves each pane's directory listing. There are no tabs. The filename index still does not read the disk. The UI thread does not enumerate. No IPC on the listing path, or C ABI. Questions 1–6 stay open. Eviction and the SSD budgets were not invented. The window was not launched from this environment.
 
+### 2026-10-25T00:50:00Z — Column sort
+
+**Signed off by:** Grok 4.7, implementation pass.
+
+**Completed prompt.** A column header sorts the rows already listed in that pane by name, size, or date modified. The same header toggles direction. Equal keys keep their order. Directories are not grouped first. Search hits are not sorted. Header clicks are enabled. The filename index still does not read the disk. Questions 1–6 stay open. The window was not launched from this environment.
+
 ### 2026-10-25T00:35:00Z — Parent directory
 
 **Signed off by:** Grok 4.7, implementation pass.
@@ -355,6 +361,6 @@ Implementation mapping: the HTML demo uses a `--sp` scale variable, Web Animatio
 
 > `list_shell` lists a chosen directory through `fx_core::shell`. Each pane has tabs and one list. Each tab has its own Back and Forward. Switching tabs does not push history. A cache hit paints before poll, and VolumeBusy does not block. The other pane stays as it is. Frecency is not applied. Do not add IPC or a C ABI on the listing path. Do not bypass `shell` with `ListingCache` or `enumerate`.
 >
-> Clicking a column header sorts the rows already listed in that pane by name, size, or date modified. The same header toggles direction. Equal keys keep their order. Directories are not grouped first. Search hits are not sorted. Header clicks are enabled.
+> Expanding a tree node skips a child whose path text equals that node or an ancestor. The comparison uses directory strings and does not follow reparse points or read the disk. A node is not compared with itself when deciding whether that node may expand.
 >
 > Do not read the USN journal in this slice. The filename index still does not read the disk. Do not decide questions 1–6. Do not invent an eviction size. SSD budgets are still unmeasured; do not invent those numbers. Reduced motion and the theme system are out of this slice.

@@ -46,9 +46,9 @@ use windows_sys::Win32::UI::Controls::{
     LVM_GETCOUNTPERPAGE, LVM_GETITEMSTATE, LVM_GETNEXTITEM, LVM_GETSELECTEDCOUNT,
     LVM_GETSUBITEMRECT, LVM_GETTOPINDEX, LVM_HITTEST, LVM_INSERTCOLUMNW, LVM_REDRAWITEMS,
     LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMCOUNT,
-    LVM_SETITEMSTATE, LVNI_SELECTED, LVN_ENDLABELEDITW, LVN_GETDISPINFOW, LVN_ITEMACTIVATE,
-    LVSICF_NOSCROLL, LVSIL_SMALL, LVS_EDITLABELS, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
-    LVS_NOSORTHEADER, LVS_OWNERDATA, LVS_REPORT, LVS_SHOWSELALWAYS, NMHDR, NMLISTVIEW,
+    LVM_SETITEMSTATE, LVNI_SELECTED, LVN_COLUMNCLICK, LVN_ENDLABELEDITW, LVN_GETDISPINFOW,
+    LVN_ITEMACTIVATE, LVSICF_NOSCROLL, LVSIL_SMALL, LVS_EDITLABELS, LVS_EX_DOUBLEBUFFER,
+    LVS_EX_FULLROWSELECT, LVS_OWNERDATA, LVS_REPORT, LVS_SHOWSELALWAYS, NMHDR, NMLISTVIEW,
     NMLVCUSTOMDRAW, NMLVDISPINFOW, NMTREEVIEWW, NM_CUSTOMDRAW, TCM_GETCURSEL, TVE_COLLAPSE,
     TVE_EXPAND, TVGN_CARET, TVIF_CHILDREN, TVIF_HANDLE, TVIF_PARAM, TVIF_TEXT, TVINSERTSTRUCTW,
     TVINSERTSTRUCTW_0, TVITEMW, TVI_LAST, TVI_ROOT, TVM_DELETEITEM, TVM_INSERTITEMW,
@@ -85,6 +85,7 @@ use fx_core::VolumeKind;
 use fx_core::{EnumError, NetworkBrowse, NetworkPlace, OpenedDirectory, Path, Shell, VolumeId};
 
 use crate::cell;
+use crate::column_sort::{RowSort, SortColumn};
 use crate::columns;
 use crate::commands::{self, Command};
 use crate::draw::{self, CellRect};
@@ -219,6 +220,8 @@ struct PaneView {
     notice: Option<PaneNotice>,
     /// Static text under the tab strip. Hidden while [`Self::notice`] is clear.
     notice_label: HWND,
+    /// Order of the rows already listed. Search hits are not sorted.
+    sort: Option<RowSort>,
 }
 
 struct ThumbJob {
@@ -536,6 +539,7 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
             tab_strip: left_tabs,
             notice: None,
             notice_label: left_notice,
+            sort: None,
         },
         right: PaneView {
             list: right_list,
@@ -553,6 +557,7 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
             tab_strip: right_tabs,
             notice: None,
             notice_label: right_notice,
+            sort: None,
         },
         tree,
         back,
@@ -686,7 +691,6 @@ fn list_style() -> WINDOW_STYLE {
         | LVS_REPORT
         | LVS_OWNERDATA
         | LVS_SHOWSELALWAYS
-        | LVS_NOSORTHEADER
         | LVS_EDITLABELS
 }
 
@@ -1168,6 +1172,7 @@ fn present_directory(hwnd: HWND, id: PaneId, path: &str, mut opened: OpenedDirec
             let pane = pane_mut(state, id);
             cancel_pane_thumbs(pane);
             pane.rows = rows;
+            resort_pane(pane);
             pane.opened = Some(opened);
             pane.current = path.to_string();
         }
@@ -1227,6 +1232,7 @@ fn show_cached_listing(hwnd: HWND, id: PaneId, path: &str, mut opened: OpenedDir
             }
             cancel_pane_thumbs(pane);
             pane.rows = rows;
+            resort_pane(pane);
             pane.current = path.to_string();
         }
         if active {
@@ -1616,7 +1622,18 @@ fn drain_pane(pane: &mut PaneView) -> RowChange {
     if timed_out {
         rows.note_timeout();
     }
+    if change != RowChange::Unchanged {
+        if let Some(sort) = pane.sort {
+            rows.sort_shown(sort);
+        }
+    }
     change
+}
+
+fn resort_pane(pane: &mut PaneView) {
+    if let Some(sort) = pane.sort {
+        pane.rows.sort_shown(sort);
+    }
 }
 
 fn apply_notice(hwnd: HWND, id: PaneId, update: NoticeUpdate) {
@@ -1683,6 +1700,45 @@ fn set_count(list: HWND, count: usize) {
     }
 }
 
+fn sort_column(subitem: i32) -> Option<SortColumn> {
+    match subitem {
+        columns::NAME => Some(SortColumn::Name),
+        columns::SIZE => Some(SortColumn::Size),
+        columns::MODIFIED => Some(SortColumn::Modified),
+        _ => None,
+    }
+}
+
+fn on_column_click(hwnd: HWND, lparam: LPARAM) {
+    let header = unsafe { &*(lparam as *const NMLISTVIEW) };
+    let list = header.hdr.hwndFrom;
+    let Some(id) = state_mut(hwnd).and_then(|state| pane_id_from_list(state, list)) else {
+        return;
+    };
+    let showing_hits =
+        state_mut(hwnd).is_some_and(|state| state.query.is_active() && state.panes.active() == id);
+    if showing_hits {
+        return;
+    }
+    let Some(column) = sort_column(header.iSubItem) else {
+        return;
+    };
+    let Some((list, count)) = state_mut(hwnd).map(|state| {
+        let pane = pane_mut(state, id);
+        let sort = RowSort::header_click(pane.sort, column);
+        pane.sort = Some(sort);
+        pane.rows.sort_shown(sort);
+        (pane.list, pane.rows.shown().len())
+    }) else {
+        return;
+    };
+    if count > 0 {
+        unsafe {
+            SendMessageW(list, LVM_REDRAWITEMS, 0, (count - 1) as LPARAM);
+        }
+    }
+}
+
 fn on_notify(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     if lparam == 0 {
         return 0;
@@ -1701,6 +1757,10 @@ fn on_notify(hwnd: HWND, lparam: LPARAM) -> LRESULT {
         LVN_ENDLABELEDITW => on_end_label_edit(hwnd, lparam),
         LVN_ITEMACTIVATE => {
             on_item_activate(hwnd, lparam);
+            0
+        }
+        LVN_COLUMNCLICK => {
+            on_column_click(hwnd, lparam);
             0
         }
         TVN_ITEMEXPANDINGW => on_item_expanding(hwnd, lparam),
