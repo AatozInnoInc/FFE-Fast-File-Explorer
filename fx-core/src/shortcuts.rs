@@ -56,11 +56,13 @@ pub enum Action {
     Refresh,
     /// Parent directory. Default: Alt+Up (`VK_UP`, 0x26).
     Parent,
+    /// Reopen the most recently closed tab. Default: Ctrl+Shift+T (0x54).
+    ReopenTab,
 }
 
 impl Action {
     /// Enum order. [`Self::index`] matches this position.
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::Back,
         Self::Forward,
         Self::FocusAddress,
@@ -71,6 +73,7 @@ impl Action {
         Self::PreviousTab,
         Self::Refresh,
         Self::Parent,
+        Self::ReopenTab,
     ];
 
     const fn index(self) -> usize {
@@ -85,6 +88,7 @@ impl Action {
             Self::PreviousTab => 7,
             Self::Refresh => 8,
             Self::Parent => 9,
+            Self::ReopenTab => 10,
         }
     }
 
@@ -100,6 +104,7 @@ impl Action {
             Self::PreviousTab => "previous_tab",
             Self::Refresh => "refresh",
             Self::Parent => "parent",
+            Self::ReopenTab => "reopen_tab",
         }
     }
 
@@ -154,12 +159,12 @@ impl fmt::Display for Chord {
 /// replaces them. Two actions never share a chord.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShortcutMap {
-    chords: [Chord; 10],
+    chords: [Chord; 11],
 }
 
 impl ShortcutMap {
     /// Alt+Left, Alt+Right, Alt+D, F6, Ctrl+T, Ctrl+W, Ctrl+Tab,
-    /// Ctrl+Shift+Tab, F5, and Alt+Up, in [`Action`] enum order.
+    /// Ctrl+Shift+Tab, F5, Alt+Up, and Ctrl+Shift+T, in [`Action`] enum order.
     pub fn builtin() -> Self {
         let chords = Action::ALL.map(builtin_chord);
         debug_assert!(
@@ -414,6 +419,12 @@ fn builtin_chord(action: Action) -> Chord {
             shift: false,
             virtual_key: VK_UP,
         },
+        Action::ReopenTab => Chord {
+            ctrl: true,
+            alt: false,
+            shift: true,
+            virtual_key: 0x54, // 'T'
+        },
     }
 }
 
@@ -571,7 +582,7 @@ mod tests {
         }
     }
 
-    fn actions() -> [Action; 10] {
+    fn actions() -> [Action; 11] {
         [
             Action::Back,
             Action::Forward,
@@ -583,6 +594,7 @@ mod tests {
             Action::PreviousTab,
             Action::Refresh,
             Action::Parent,
+            Action::ReopenTab,
         ]
     }
 
@@ -616,6 +628,7 @@ mod tests {
             ),
             (Action::Refresh, false, false, false, 0x74, "F5"),
             (Action::Parent, false, true, false, 0x26, "Alt+Up"),
+            (Action::ReopenTab, true, false, true, 0x54, "Ctrl+Shift+T"),
         ];
         for (action, ctrl, alt, shift, virtual_key, text) in cases {
             let chord = Chord {
