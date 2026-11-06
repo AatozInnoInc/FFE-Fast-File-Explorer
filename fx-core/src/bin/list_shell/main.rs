@@ -11,6 +11,7 @@ mod columns;
 mod commands;
 #[cfg(windows)]
 mod draw;
+mod expand_guard;
 #[cfg(windows)]
 mod file_ops;
 mod icons;

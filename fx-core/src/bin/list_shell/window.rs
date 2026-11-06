@@ -89,6 +89,7 @@ use crate::column_sort::{RowSort, SortColumn};
 use crate::columns;
 use crate::commands::{self, Command};
 use crate::draw::{self, CellRect};
+use crate::expand_guard::repeats_ancestor;
 use crate::file_ops::{self, FileOp, Op};
 use crate::icons::{icon_key, IconCache, IconKey};
 use crate::images;
@@ -2233,6 +2234,11 @@ fn expand_directory(hwnd: HWND, index: usize) -> LRESULT {
     let Some(path) = node_path(hwnd, index) else {
         return 1;
     };
+    // Compare the node with its ancestors only. Passing the node path as both
+    // arguments would always report a loop.
+    if directory_repeats_ancestor(hwnd, index, &path) {
+        return 1;
+    }
     let Some(shell) = state_mut(hwnd).map(|state| state.shell.clone()) else {
         return 1;
     };
@@ -2323,6 +2329,29 @@ fn insert_root(hwnd: HWND, path: &str) {
     }
 }
 
+fn ancestor_paths(nodes: &[FolderNode], index: usize) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut current = index;
+    while let Some(parent) = nodes
+        .iter()
+        .position(|node| !node.removed && node.child_indices.contains(&current))
+    {
+        paths.push(nodes[parent].path.clone());
+        current = parent;
+    }
+    paths
+}
+
+/// True when `path` matches an ancestor. The node path is not passed as the
+/// node argument, because that comparison is always true.
+fn directory_repeats_ancestor(hwnd: HWND, index: usize, path: &str) -> bool {
+    let Some(state) = state_mut(hwnd) else {
+        return false;
+    };
+    let ancestors = ancestor_paths(&state.nodes, index);
+    repeats_ancestor(&ancestors, "", path)
+}
+
 fn insert_directories(hwnd: HWND, parent: usize, names: &[String]) {
     let Some((tree, parent_item, parent_path)) = node_insert_target(hwnd, parent) else {
         return;
@@ -2332,6 +2361,13 @@ fn insert_directories(hwnd: HWND, parent: usize, names: &[String]) {
             continue;
         }
         let path = child_directory(&parent_path, name);
+        let repeats = state_mut(hwnd).is_some_and(|state| {
+            let ancestors = ancestor_paths(&state.nodes, parent);
+            repeats_ancestor(&ancestors, &parent_path, &path)
+        });
+        if repeats {
+            continue;
+        }
         let index = {
             let Some(state) = state_mut(hwnd) else {
                 return;

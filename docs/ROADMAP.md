@@ -46,6 +46,7 @@ The next substantial capability step.
 - [x] A timed-out pane shows "Not responding" on its own label. A busy volume does not. A finished listing clears it. There is no auto-retry — `done`
 - [x] Up and Alt+Up open the parent directory of the active pane. Drive roots and UNC share roots stay put. The parent comes from the path text — `done`
 - [x] Column headers sort the rows already listed by name, size, or date modified. Equal keys keep their order. Search hits are not sorted — `done`
+- [x] A tree child whose path text repeats the node or an ancestor is not inserted. Reparse targets are not followed — `done`
 
 ## Future / parking lot
 
