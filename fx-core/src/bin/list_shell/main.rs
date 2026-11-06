@@ -15,6 +15,7 @@ mod file_ops;
 mod icons;
 mod images;
 mod nav;
+mod pane_notice;
 mod panes;
 mod places;
 mod query;
