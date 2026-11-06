@@ -84,6 +84,7 @@ use fx_core::thumbs::{ThumbCache, ThumbTicket, TryThumb};
 use fx_core::VolumeKind;
 use fx_core::{EnumError, NetworkBrowse, NetworkPlace, OpenedDirectory, Path, Shell, VolumeId};
 
+use crate::address_focus::{focuses_address, Mods};
 use crate::cell;
 use crate::columns;
 use crate::commands::{self, Command};
@@ -131,6 +132,10 @@ const OTHER_WIDTH: i32 = 64;
 const NM_SETFOCUS: u32 = 4294967289;
 /// `EM_SETCUEBANNER`.
 const EM_SETCUEBANNER: u32 = 0x1501;
+/// `EM_SETSEL`. Select the whole address when Alt+D focuses it.
+const EM_SETSEL: u32 = 0x00B1;
+/// Virtual-key code for D.
+const VK_D: u16 = 0x44;
 /// Width of the Timeout button. Not a performance budget.
 const TIMEOUT_WIDTH: i32 = 84;
 const NETWORK_LABEL: &str = "Network";
@@ -728,6 +733,18 @@ fn intercept(message: &MSG) -> bool {
             }
             VK_RIGHT => {
                 go_forward(root);
+                true
+            }
+            VK_D if focuses_address(
+                Mods {
+                    alt: true,
+                    ctrl: key_down(VK_CONTROL),
+                    shift: key_down(VK_SHIFT),
+                },
+                VK_D,
+            ) =>
+            {
+                focus_address(root);
                 true
             }
             _ => false,
@@ -3026,6 +3043,16 @@ fn pane_id_from_list(state: &ListWindow, list: HWND) -> Option<PaneId> {
         Some(PaneId::Right)
     } else {
         None
+    }
+}
+
+fn focus_address(hwnd: HWND) {
+    let Some(address) = state_mut(hwnd).map(|state| state.address) else {
+        return;
+    };
+    unsafe {
+        SetFocus(address);
+        SendMessageW(address, EM_SETSEL, 0, -1);
     }
 }
 
