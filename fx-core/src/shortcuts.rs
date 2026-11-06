@@ -54,11 +54,13 @@ pub enum Action {
     PreviousTab,
     /// Refresh the current listing. Default: F5 (0x74).
     Refresh,
+    /// Parent directory. Default: Alt+Up (`VK_UP`, 0x26).
+    Parent,
 }
 
 impl Action {
     /// Enum order. [`Self::index`] matches this position.
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Back,
         Self::Forward,
         Self::FocusAddress,
@@ -68,6 +70,7 @@ impl Action {
         Self::NextTab,
         Self::PreviousTab,
         Self::Refresh,
+        Self::Parent,
     ];
 
     const fn index(self) -> usize {
@@ -81,6 +84,7 @@ impl Action {
             Self::NextTab => 6,
             Self::PreviousTab => 7,
             Self::Refresh => 8,
+            Self::Parent => 9,
         }
     }
 
@@ -95,6 +99,7 @@ impl Action {
             Self::NextTab => "next_tab",
             Self::PreviousTab => "previous_tab",
             Self::Refresh => "refresh",
+            Self::Parent => "parent",
         }
     }
 
@@ -149,12 +154,12 @@ impl fmt::Display for Chord {
 /// replaces them. Two actions never share a chord.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShortcutMap {
-    chords: [Chord; 9],
+    chords: [Chord; 10],
 }
 
 impl ShortcutMap {
     /// Alt+Left, Alt+Right, Alt+D, F6, Ctrl+T, Ctrl+W, Ctrl+Tab,
-    /// Ctrl+Shift+Tab, and F5, in [`Action`] enum order.
+    /// Ctrl+Shift+Tab, F5, and Alt+Up, in [`Action`] enum order.
     pub fn builtin() -> Self {
         let chords = Action::ALL.map(builtin_chord);
         debug_assert!(
@@ -403,6 +408,12 @@ fn builtin_chord(action: Action) -> Chord {
             shift: false,
             virtual_key: VK_F5,
         },
+        Action::Parent => Chord {
+            ctrl: false,
+            alt: true,
+            shift: false,
+            virtual_key: VK_UP,
+        },
     }
 }
 
@@ -560,7 +571,7 @@ mod tests {
         }
     }
 
-    fn actions() -> [Action; 9] {
+    fn actions() -> [Action; 10] {
         [
             Action::Back,
             Action::Forward,
@@ -571,6 +582,7 @@ mod tests {
             Action::NextTab,
             Action::PreviousTab,
             Action::Refresh,
+            Action::Parent,
         ]
     }
 
@@ -603,6 +615,7 @@ mod tests {
                 "Ctrl+Shift+Tab",
             ),
             (Action::Refresh, false, false, false, 0x74, "F5"),
+            (Action::Parent, false, true, false, 0x26, "Alt+Up"),
         ];
         for (action, ctrl, alt, shift, virtual_key, text) in cases {
             let chord = Chord {
@@ -620,15 +633,6 @@ mod tests {
             );
         }
         assert_eq!(map.lookup(key(0x42)), None);
-        assert_eq!(
-            map.lookup(Chord {
-                ctrl: false,
-                alt: true,
-                shift: false,
-                virtual_key: 0x26,
-            }),
-            None
-        );
         assert!(map.overrides().is_empty());
     }
 
@@ -745,11 +749,11 @@ mod tests {
     #[test]
     fn parse_unknown_action_is_an_error() {
         assert_eq!(
-            ShortcutMap::parse("parent=Alt+Up").unwrap_err(),
+            ShortcutMap::parse("not_an_action=Alt+Up").unwrap_err(),
             ParseError::UnknownAction
         );
         assert_eq!(
-            ShortcutMap::parse("reopen=Ctrl+Shift+T").unwrap_err(),
+            ShortcutMap::parse("still_not_an_action=Ctrl+Shift+T").unwrap_err(),
             ParseError::UnknownAction
         );
         assert_eq!(
@@ -828,12 +832,12 @@ mod tests {
             Err(LoadError::Parse(ParseError::Empty))
         ));
 
-        fs::write(&path, "parent=Alt+Up\n").unwrap();
+        fs::write(&path, "not_an_action=Alt+Up\n").unwrap();
         assert!(matches!(
             ShortcutMap::load(&path),
             Err(LoadError::Parse(ParseError::UnknownAction))
         ));
-        assert_eq!(fs::read_to_string(&path).unwrap(), "parent=Alt+Up\n");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "not_an_action=Alt+Up\n");
 
         let nested = dir.0.join("nested");
         fs::create_dir(&nested).unwrap();
