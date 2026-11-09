@@ -92,7 +92,7 @@ use crate::column_sort::{RowSort, SortColumn, SortDir};
 use crate::columns;
 use crate::commands::{self, Command};
 use crate::draw::{self, CellRect};
-use crate::expand_guard::repeats_ancestor;
+use crate::expand_guard::repeats_lineage;
 use crate::file_ops::{self, FileOp, Op};
 use crate::icons::{icon_key, IconCache, IconKey};
 use crate::images;
@@ -2397,8 +2397,7 @@ fn expand_directory(hwnd: HWND, index: usize) -> LRESULT {
     let Some(path) = node_path(hwnd, index) else {
         return 1;
     };
-    // Compare the node with its ancestors only. Passing the node path as both
-    // arguments would always report a loop.
+    // The node is compared with its ancestors only; it always equals itself.
     if directory_repeats_ancestor(hwnd, index, &path) {
         return 1;
     }
@@ -2492,6 +2491,8 @@ fn insert_root(hwnd: HWND, path: &str) {
     }
 }
 
+/// Paths above `index`, nearest first. Each level scans `nodes` for the
+/// parent, so callers compute this once per expansion, never per child.
 fn ancestor_paths(nodes: &[FolderNode], index: usize) -> Vec<String> {
     let mut paths = Vec::new();
     let mut current = index;
@@ -2505,30 +2506,30 @@ fn ancestor_paths(nodes: &[FolderNode], index: usize) -> Vec<String> {
     paths
 }
 
-/// True when `path` matches an ancestor. The node path is not passed as the
-/// node argument, because that comparison is always true.
+/// True when `path`, the directory of node `index`, matches an ancestor.
 fn directory_repeats_ancestor(hwnd: HWND, index: usize, path: &str) -> bool {
-    let Some(state) = state_mut(hwnd) else {
-        return false;
-    };
-    let ancestors = ancestor_paths(&state.nodes, index);
-    repeats_ancestor(&ancestors, "", path)
+    state_mut(hwnd).is_some_and(|state| {
+        let ancestors = ancestor_paths(&state.nodes, index);
+        repeats_lineage(&ancestors, path)
+    })
 }
 
 fn insert_directories(hwnd: HWND, parent: usize, names: &[String]) {
     let Some((tree, parent_item, parent_path)) = node_insert_target(hwnd, parent) else {
         return;
     };
+    let Some(mut lineage) = state_mut(hwnd).map(|state| ancestor_paths(&state.nodes, parent))
+    else {
+        return;
+    };
+    lineage.push(parent_path.clone());
     for name in names {
         if name.is_empty() {
             continue;
         }
         let path = child_directory(&parent_path, name);
-        let repeats = state_mut(hwnd).is_some_and(|state| {
-            let ancestors = ancestor_paths(&state.nodes, parent);
-            repeats_ancestor(&ancestors, &parent_path, &path)
-        });
-        if repeats {
+        if repeats_lineage(&lineage, &path) {
+            eprintln!("list_shell skipped tree child {path}: it repeats its own branch");
             continue;
         }
         let index = {
