@@ -41,14 +41,14 @@ The next substantial capability step.
 - [x] Dual-pane browsing. Both panes start at the same path. Left is active. Other and F6 switch focus and do not change paths. Each pane uses the shell cache-hit and VolumeBusy rules. Tabs are not included — `done`
 - [x] Tabs. Each pane has its own tab strip. A new tab copies that pane's path. Choosing a tab lists it through the shell cache-hit and VolumeBusy rules and does not change the other pane. There is no third list — `done`
 - [x] Per-tab Back and Forward. Switching tabs does not push history. A new tab starts with no Back. Closing a tab drops that stack — `done`
-- [x] Alt+D focuses the address bar and selects its text. Alt+Left and Alt+Right stay Back and Forward — `done`
-- [x] Customize every keyboard shortcut. Built-in chords stay until the user changes them. A missing `rapid-explorer-shortcuts.txt` stays missing. Enter in the address bar is not a customizable chord — `done`
-- [x] A timed-out pane shows "Not responding" on its own label. A busy volume does not. A finished listing clears it. There is no auto-retry — `done`
-- [x] Up and Alt+Up open the parent directory of the active pane. Drive roots and UNC share roots stay put. The parent comes from the path text — `done`
-- [x] Column headers sort the rows already listed by name, size, or date modified. Equal keys keep their order. Search hits are not sorted — `done`
-- [x] A tree child whose path text repeats the node or an ancestor is not inserted. Reparse targets are not followed — `done`
-- [x] A reparse point draws a small square on its name icon. Search hits do not. There is no shell overlay — `done`
-- [x] Ctrl+Shift+T reopens the most recently closed tab in that pane. The closed-tab stack is unbounded. Eviction is TODO — define — `done`
+- [x] Alt+D focuses the address bar and selects its text. Alt+Left and Alt+Right stay Back and Forward (`done`)
+- [x] Customize every keyboard shortcut. Built-in chords stay until the user changes them. A missing `rapid-explorer-shortcuts.txt` stays missing, and storing the builtin map removes it. A chord needs Ctrl or Alt unless its key is F1 to F24. An unreadable file is logged and the builtin chords are used. Enter in the address bar is not a customizable chord (`done`)
+- [x] A timed-out pane shows "Not responding" on its own label. A busy volume does not. A finished listing clears it. There is no auto-retry (`done`)
+- [x] Alt+Up opens the parent directory of the active pane. Plain Up stays list navigation. Drive roots and UNC share roots stay put. The parent comes from the path text (`done`)
+- [x] Column headers sort the rows already listed by name, size, or date modified. Equal keys keep their order. The header shows the sort arrow. Selected files stay selected when rows reorder. An unchanged cache hit does not repaint. Search hits are not sorted (`done`)
+- [x] A tree child whose path text repeats the node or an ancestor is not inserted. Reparse targets are not followed, so a junction back to an ancestor under another name is not caught yet (`done`)
+- [x] A reparse point draws a small square on its name icon in the system highlight color. Search hits do not. There is no shell overlay (`done`)
+- [x] Ctrl+Shift+T reopens the most recently closed tab in that pane, starting on that path with no Back. The closed-tab stack is unbounded. Eviction is TODO: define (`done`)
 
 ## Future / parking lot
 

@@ -313,49 +313,55 @@ Implementation mapping: the HTML demo uses a `--sp` scale variable, Web Animatio
 
 **Completed prompt.** Two lists start at the same path. The left list is active. Other and F6 switch the active list and do not change either path. Clicking a list activates it and does not open a new listing. Each list uses `Shell::open`: a cache hit paints before poll, and a busy volume stays pending for the timer instead of blocking. The inactive list keeps its rows while the other list navigates. Search rows are drawn in the active list. An empty query leaves each pane's directory listing. There are no tabs. The filename index still does not read the disk. The UI thread does not enumerate. No IPC on the listing path, or C ABI. Questions 1–6 stay open. Eviction and the SSD budgets were not invented. The window was not launched from this environment.
 
-### 2026-10-25T01:35:00Z — Reopen closed tab
+### 2026-11-09T12:00:00Z: Review of the stacked slices #24 to #31
+
+**Signed off by:** Claude Code, design/review pass.
+
+**Completed prompt.** Reviewed #24 to #31 against `.cursor/rules/`, which the stack predates. The fixes are one commit per pull request on `claude/wizardly-noether-zl8owe`, after a merge of `main` that brings in the rules, `AGENTS.md`, and `CLAUDE.md`. Portable CI (Linux clippy) was red on every pull request from #24 on and is green again. Behavior changes: sorted rows keep the selection on the same files, an unchanged sorted cache hit no longer repaints, a reopened tab has no stale Back, and shortcut overrides need Ctrl or Alt unless the key is a function key. Open questions for the owner: folders-first and natural name order, case-insensitive path identity, junction loop detection by file identity, a closed-tab cap, and a logging facility to replace `eprintln!`. The window was not launched from this environment; Windows clippy ran through the `x86_64-pc-windows-gnu` target.
+
+### 2026-10-25T01:35:00Z: Reopen closed tab
 
 **Signed off by:** Grok 4.7, implementation pass.
 
-**Completed prompt.** Closing a tab remembers its path on that pane. Ctrl+Shift+T reopens the most recent closed path as a new tab and navigates there. The stack is unbounded. Eviction is TODO — define. No cap was invented. The filename index still does not read the disk. Questions 1–6 stay open. The window was not launched from this environment.
+**Completed prompt.** Closing a tab remembers its path on that pane. Ctrl+Shift+T reopens the most recent closed path as a new tab and navigates there. The stack is unbounded. Eviction is TODO: define. No cap was invented. The filename index still does not read the disk. Questions 1–6 stay open. The window was not launched from this environment.
 
-### 2026-10-25T01:20:00Z — Reparse badge
+### 2026-10-25T01:20:00Z: Reparse badge
 
 **Signed off by:** Grok 4.7, implementation pass.
 
 **Completed prompt.** A reparse point draws a small square on its name icon. The square's geometry comes from the icon rectangle. There is no shell-overlay handler. Search hits do not show the badge. The filename index still does not read the disk. Questions 1–6 stay open. The window was not launched from this environment.
 
-### 2026-10-25T01:05:00Z — Tree expand loop guard
+### 2026-10-25T01:05:00Z: Tree expand loop guard
 
 **Signed off by:** Grok 4.7, implementation pass.
 
 **Completed prompt.** Expanding a tree node skips a child whose path text equals that node or an ancestor. The comparison uses directory strings and does not follow reparse points or read the disk. A node is compared with its ancestors, not with itself, when deciding whether that node may expand. The filename index still does not read the disk. Questions 1–6 stay open. The window was not launched from this environment.
 
-### 2026-10-25T00:50:00Z — Column sort
+### 2026-10-25T00:50:00Z: Column sort
 
 **Signed off by:** Grok 4.7, implementation pass.
 
 **Completed prompt.** A column header sorts the rows already listed in that pane by name, size, or date modified. The same header toggles direction. Equal keys keep their order. Directories are not grouped first. Search hits are not sorted. Header clicks are enabled. The filename index still does not read the disk. Questions 1–6 stay open. The window was not launched from this environment.
 
-### 2026-10-25T00:35:00Z — Parent directory
+### 2026-10-25T00:35:00Z: Parent directory
 
 **Signed off by:** Grok 4.7, implementation pass.
 
 **Completed prompt.** Up and Alt+Up move the active pane to the parent computed from the path text. A drive root and a UNC share root do not move. The shortcut map's Parent action defaults to Alt+Up. This does not read the disk. The filename index still does not read the disk. Questions 1–6 stay open. The window was not launched from this environment.
 
-### 2026-10-25T00:20:00Z — Not responding
+### 2026-10-25T00:20:00Z: Not responding
 
 **Signed off by:** Grok 4.7, implementation pass.
 
 **Completed prompt.** A timed-out pane shows "Not responding" on its own label. A busy volume does not. Finished clears the notice. Cancel, failure, and a batch leave it. There is no auto-retry. The other pane is unchanged. The filename index still does not read the disk. Questions 1–6 stay open. The window was not launched from this environment.
 
-### 2026-10-25T00:05:00Z — Shortcut overrides
+### 2026-10-25T00:05:00Z: Shortcut overrides
 
 **Signed off by:** Grok 4.7, implementation pass.
 
 **Completed prompt.** One map holds Back, Forward, Focus address, Toggle pane, New tab, Close tab, Next tab, Previous tab, and Refresh. Built-in chords stay until an override file changes them. A missing file stays missing. An empty file is not applied. Refresh re-lists the active pane only. Enter in the address bar is not in the map. The filename index still does not read the disk. Questions 1–6 stay open. The window was not launched from this environment.
 
-### 2026-10-24T23:50:00Z — Alt+D focuses the address bar
+### 2026-10-24T23:50:00Z: Alt+D focuses the address bar
 
 **Signed off by:** Grok 4.7, implementation pass.
 
