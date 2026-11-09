@@ -18,6 +18,9 @@ mod panes;
 mod places;
 mod query;
 mod rows;
+#[cfg(windows)]
+mod tab_strip;
+mod tabs;
 mod timeout;
 mod tree;
 
