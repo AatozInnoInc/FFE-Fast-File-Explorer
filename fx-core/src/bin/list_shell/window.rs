@@ -844,10 +844,10 @@ fn run_shortcut(hwnd: HWND, action: Action) {
     }
 }
 
+/// [`Action::Parent`]: list the parent of the active pane's directory as a
+/// new history entry. A drive root or UNC share root has no parent.
 fn go_parent(hwnd: HWND) {
-    let Some(path) =
-        state_mut(hwnd).map(|state| pane_ref(state, state.panes.active()).current.clone())
-    else {
+    let Some(path) = active_pane_path(hwnd) else {
         return;
     };
     let Some(parent) = parent_directory(&path) else {
@@ -856,13 +856,18 @@ fn go_parent(hwnd: HWND) {
     request_navigation(hwnd, parent, NavKind::Push);
 }
 
+/// [`Action::Refresh`]: list the active pane's directory again without
+/// pushing history.
 fn refresh_active(hwnd: HWND) {
-    let Some(path) =
-        state_mut(hwnd).map(|state| pane_ref(state, state.panes.active()).current.clone())
-    else {
+    let Some(path) = active_pane_path(hwnd) else {
         return;
     };
     request_navigation(hwnd, path, NavKind::Refresh);
+}
+
+/// Directory the active pane is showing.
+fn active_pane_path(hwnd: HWND) -> Option<String> {
+    state_mut(hwnd).map(|state| pane_ref(state, state.panes.active()).current.clone())
 }
 
 /// Overrides from `rapid-explorer-shortcuts.txt` beside the settings file.
