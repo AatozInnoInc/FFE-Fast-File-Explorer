@@ -40,6 +40,7 @@ The next substantial capability step.
 - [x] Search-as-you-type over names this window has already listed on local volumes. The keystroke stores text; the timer ranks. An empty or whitespace query restores the directory listing. Frecency is not applied. The index does not drop names that later disappear — `done`
 - [x] Dual-pane browsing. Both panes start at the same path. Left is active. Other and F6 switch focus and do not change paths. Each pane uses the shell cache-hit and VolumeBusy rules. Tabs are not included — `done`
 - [x] Tabs. Each pane has its own tab strip. A new tab copies that pane's path. Choosing a tab lists it through the shell cache-hit and VolumeBusy rules and does not change the other pane. There is no third list — `done`
+- [x] Per-tab Back and Forward. Switching tabs does not push history. A new tab starts with no Back. Closing a tab drops that stack — `done`
 
 ## Future / parking lot
 

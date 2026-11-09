@@ -18,6 +18,7 @@ mod panes;
 mod places;
 mod query;
 mod rows;
+mod tab_history;
 #[cfg(windows)]
 mod tab_strip;
 mod tabs;
