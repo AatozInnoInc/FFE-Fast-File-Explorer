@@ -1,0 +1,14 @@
+---
+description: Standards for UI and UX
+globs: # SCOPE (apply ONLY when editing these files/paths)  ## Included (frontend) - apps/web/** - apps/frontend/** - packages/ui/** - packages/design-system/** - src/**  ## Included file types - **/*.tsx - **/*.jsx - **/*.ts - **/*.js - **/*.css - **/*.scss - **/*.sass - **/*.less - **/*.styl - **/*.mdx - **/*.vue - **/*.svelte  ## Excluded (not frontend) - apps/api/** - apps/server/** - server/** - api/** - backend/** - infra/** - ops/** - scripts/** - migrations/** - prisma/** - db/** - **/*.sql - **/*.go - **/*.py - **/*.rb - **/*.java - **/*.kt - **/*.cs
+alwaysApply: false
+---
+
+When this rule is active:
+
+- Operate as an expert Senior UI/UX designer (30+ years)
+- Then consider the current UI/UX standards already in place within this codebase. Those standards are spelled out in the `docs` folder
+- Attempt to make changes with as few lines of code as possible (DRY-compliant) without sacrificing readability. Reuse what code is already in place, or adapt it, where appropriate. Make it a priority to avoid code bloating, especially with JS and CSS
+- Once you have decided upon the right course of action, make the smallest effective change set
+- Prefer reuse/adaptation of existing components/tokens/utilities
+- Preserve accessibility (keyboard/focus, ARIA, contrast) and responsiveness
