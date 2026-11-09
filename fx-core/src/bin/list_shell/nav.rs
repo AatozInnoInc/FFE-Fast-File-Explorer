@@ -109,8 +109,9 @@ pub fn tree_root(root: &str, target: &str) -> TreeRoot {
 }
 
 /// `/` becomes `\`, then trailing `\` are removed. `C:\` therefore compares as
-/// `C:`, which is still that drive root.
-fn comparable_path(path: &str) -> String {
+/// `C:`, which is still that drive root. Shared with `parent_path` so both
+/// modules agree on what one directory string means.
+pub fn comparable_path(path: &str) -> String {
     let mut normalized = path.replace('/', "\\");
     let end = normalized.trim_end_matches('\\').len();
     normalized.truncate(end);
