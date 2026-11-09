@@ -2,7 +2,7 @@
 
 ## Before you write code
 
-Read, in order: `docs/HANDOFF.md`, `docs/ARCHITECTURE.md`, and this file. The active work is always the single **Prompt for Next Agent** at the bottom of `HANDOFF.md`.
+Read, in order: `AGENTS.md` and the project rules in `.cursor/rules/`, `docs/HANDOFF.md`, `docs/ARCHITECTURE.md`, and this file. The active work is always the single **Prompt for Next Agent** at the bottom of `HANDOFF.md`.
 
 ## The handoff protocol
 
