@@ -1,0 +1,30 @@
+---
+description: 
+alwaysApply: true
+---
+
+# Key Notes
+- Keep changes surgical. Avoid sweeping edits, broad renames, and other considerations
+- Keep changes very transparent by documenting your changes with brief but helpful comments in headers and docstrings
+- With each change you make, confirm each change with me before proceeding to the next one
+- Be thorough in researching upstream and downstream dependencies of each area you modify
+- Don't ever make critical decisions without first discussing with me
+
+# Agent Instructions
+- Perform tasks iteratively in small slices. Keep features small, refactoring small, and make only improvements/modifications after doing thorough investigation into the full impact of each change
+- Test and build often
+- Be transparent in your planning, telling me what you're thinking, doing, and why
+- If your changes affect pipelines in any way, be sure to update build files, tell me what is changing and why. Also provide clear explanations on how to test these new changes
+- Only proceed with your changes when there are no further questions remaining
+- I will manually review every change, so keep the diffs human-digestible and keep the cognitive load very low.
+- At the end of every task, tell me what you did, the impact it has, and how anyone can verify your change
+- For every response: DO NOT give excessive information. Keep things concise. Make good use of visual aids, table and charts. If a detail needs more information, we can always dive into it together
+
+# Constraints
+- There can be NO failing tests
+- Keep CI/CD pipelines optimal. No design, code, structure which is non-compliant is allowed
+
+# Final Points
+- Prioritize quality over quantity. This is a mature codebase with many users, so it's imperative we keep our changes and feature discrete and concrete. More output DOES NOT EQUAL more progress. SOLID, TESTED, WORKING code DOES EQUAL more progress
+- Review these instructions after completing each step, consider if there are further questions to ask. If so, ask me.
+- Always think through each step before implementing. Use TODOs for action planning. Questions are rewarded more than guesses

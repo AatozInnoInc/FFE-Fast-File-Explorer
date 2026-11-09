@@ -1,0 +1,30 @@
+---
+description: 
+alwaysApply: true
+---
+
+Prioritize and observe the following patterns below. Holistically, the codebase must be in compliance with these best practices:
+
+- SOLID
+- Repository patterns
+- CQRS
+- Command patterns
+- Factory patterns
+- Test-first (this is a test framework)
+- Self-documenting code
+- Extensive logging throughout the product
+- Exception control flow
+- SRP
+- SOC
+- Good variable names
+- Consistent formatting
+- Consistent structure
+- Minimal duplication (DRY)
+- Concise error handling
+- High-quality testing
+- Safeties
+- Null guarding
+- Internal consistency. i.e., When we null-guard a string, we do it the same way everywhere.
+- Exceptional memory management (where applicable) such as memory fencing
+- Avoid negative expressions. Check for true/positive checks intead of false/negative checks. Exception: allows for early exits
+- NEVER combine if statements and their expressions on a single line, i.e. `if (n === 0) return;`
