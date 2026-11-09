@@ -1,8 +1,9 @@
+#![cfg_attr(not(windows), allow(dead_code))]
 //! Paths of tabs the user closed, so the most recent one can be reopened.
 //!
 //! Nothing here calls Win32. [`ClosedTabs`] stores each path it is given and
 //! does not read the disk or the USN journal. The most recent path is last.
-//! The stack is unbounded. Eviction is TODO — define.
+//! The stack is unbounded. Eviction is TODO: define.
 
 /// Closed paths. The most recent path is last.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,12 +16,12 @@ impl ClosedTabs {
         Self { paths: Vec::new() }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.paths.len()
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.paths.is_empty()
     }

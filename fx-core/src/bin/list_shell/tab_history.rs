@@ -83,6 +83,12 @@ impl TabHistories {
     /// active. Returns that path.
     pub fn new_tab(&mut self) -> &str {
         let path = self.active_path().to_string();
+        self.open_tab(path)
+    }
+
+    /// Append a tab started at `path` with no Back or Forward, and make it
+    /// active. Returns that path.
+    pub fn open_tab(&mut self, path: impl Into<String>) -> &str {
         self.tabs.push(History::start(path));
         self.active = self.tabs.len() - 1;
         self.active_path()
@@ -149,6 +155,18 @@ mod tests {
         assert!(tabs.can_back());
         assert!(!tabs.can_forward());
         assert_eq!(tabs.paths(), vec!["C:\\b"]);
+    }
+
+    #[test]
+    fn open_tab_starts_on_its_path_with_no_back() {
+        let mut tabs = TabHistories::start("C:\\a");
+        let _ = tabs.go("C:\\b");
+        assert!(tabs.can_back());
+        assert_eq!(tabs.open_tab("D:\\closed"), "D:\\closed");
+        assert_eq!(tabs.active_index(), 1);
+        assert!(!tabs.can_back());
+        assert!(!tabs.can_forward());
+        assert_eq!(tabs.paths(), ["C:\\b", "D:\\closed"]);
     }
 
     #[test]

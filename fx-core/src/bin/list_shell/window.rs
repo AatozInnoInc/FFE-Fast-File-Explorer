@@ -230,7 +230,7 @@ struct PaneView {
     notice_label: HWND,
     /// Order of the rows already listed. Search hits are not sorted.
     sort: Option<RowSort>,
-    /// Paths of tabs closed in this pane. Most recent last. Eviction: TODO — define.
+    /// Paths of tabs closed in this pane. Most recent last. Eviction: TODO, define.
     closed: ClosedTabs,
 }
 
@@ -3543,20 +3543,22 @@ fn close_active_tab(hwnd: HWND) {
     }
 }
 
+/// [`Action::ReopenTab`] on the active pane: open the most recently closed
+/// path as a new tab and list it. The tab starts on that path with no Back,
+/// like a fresh tab, so Back never leads to the tab that was active before.
 fn reopen_closed_tab(hwnd: HWND) {
-    let Some(id) = state_mut(hwnd).map(|state| state.panes.active()) else {
-        return;
-    };
-    let Some(path) = state_mut(hwnd).and_then(|state| pane_mut(state, id).closed.reopen()) else {
-        return;
-    };
-    if let Some(state) = state_mut(hwnd) {
+    let Some((id, path)) = state_mut(hwnd).and_then(|state| {
+        let id = state.panes.active();
         let pane = pane_mut(state, id);
-        let _ = pane.history.new_tab();
-        let _ = pane.tabs.new_tab();
-    }
+        let path = pane.closed.reopen()?;
+        pane.history.open_tab(path.as_str());
+        pane.tabs.open_tab(path.as_str());
+        Some((id, path))
+    }) else {
+        return;
+    };
     refill_tabs(hwnd, id);
-    request_navigation(hwnd, path, NavKind::Push);
+    request_navigation(hwnd, path, NavKind::Restore);
 }
 
 /// [`Action::NextTab`] on the active pane, or [`Action::PreviousTab`] when
