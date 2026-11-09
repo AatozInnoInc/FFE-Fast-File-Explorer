@@ -313,7 +313,7 @@ Implementation mapping: the HTML demo uses a `--sp` scale variable, Web Animatio
 
 **Completed prompt.** Two lists start at the same path. The left list is active. Other and F6 switch the active list and do not change either path. Clicking a list activates it and does not open a new listing. Each list uses `Shell::open`: a cache hit paints before poll, and a busy volume stays pending for the timer instead of blocking. The inactive list keeps its rows while the other list navigates. Search rows are drawn in the active list. An empty query leaves each pane's directory listing. There are no tabs. The filename index still does not read the disk. The UI thread does not enumerate. No IPC on the listing path, or C ABI. Questions 1–6 stay open. Eviction and the SSD budgets were not invented. The window was not launched from this environment.
 
-### 2026-10-25T00:05:00Z — Shortcut overrides
+### 2026-10-25T00:05:00Z: Shortcut overrides
 
 **Signed off by:** Grok 4.7, implementation pass.
 

@@ -136,6 +136,8 @@ const EM_SETSEL: u32 = 0x00B1;
 /// Width of the Timeout button. Not a performance budget.
 const TIMEOUT_WIDTH: i32 = 84;
 const NETWORK_LABEL: &str = "Network";
+/// Shortcut overrides, beside the settings file.
+const SHORTCUTS_FILE: &str = "rapid-explorer-shortcuts.txt";
 const CLASS_NAME: windows_sys::core::PCWSTR = w!("RapidExplorerList");
 
 struct ListWindow {
@@ -746,6 +748,8 @@ fn intercept(message: &MSG) -> bool {
     true
 }
 
+/// The chord for a key-down message, read with the live modifier state.
+/// A bare modifier key is not a chord.
 fn message_chord(message: &MSG) -> Option<Chord> {
     if message.message != WM_KEYDOWN && message.message != WM_SYSKEYDOWN {
         return None;
@@ -762,6 +766,7 @@ fn message_chord(message: &MSG) -> Option<Chord> {
     })
 }
 
+/// Dispatch one [`Action`] from the [`ShortcutMap`]. Every action has a handler.
 fn run_shortcut(hwnd: HWND, action: Action) {
     match action {
         Action::Back => go_back(hwnd),
@@ -785,12 +790,24 @@ fn refresh_active(hwnd: HWND) {
     request_navigation(hwnd, path, NavKind::Refresh);
 }
 
+/// Overrides from `rapid-explorer-shortcuts.txt` beside the settings file.
+/// A file that cannot be read or parsed is reported and the builtin chords
+/// are used, so a typo never leaves the window without shortcuts.
 fn load_shortcuts(settings_file: &std::path::Path) -> ShortcutMap {
     let path = settings_file
         .parent()
         .unwrap_or_else(|| std::path::Path::new(""))
-        .join("rapid-explorer-shortcuts.txt");
-    ShortcutMap::load(&path).unwrap_or_else(|_| ShortcutMap::builtin())
+        .join(SHORTCUTS_FILE);
+    match ShortcutMap::load(&path) {
+        Ok(map) => map,
+        Err(err) => {
+            eprintln!(
+                "list_shell ignored {} and kept the builtin shortcuts: {err}",
+                path.display()
+            );
+            ShortcutMap::builtin()
+        }
+    }
 }
 
 fn is_address(hwnd: HWND, candidate: HWND) -> bool {
