@@ -76,7 +76,12 @@ impl PaneTabs {
     /// Append a tab that copies the active path and make it active. Return that path.
     pub fn new_tab(&mut self) -> &str {
         let path = self.paths[self.active].clone();
-        self.paths.push(path);
+        self.open_tab(path)
+    }
+
+    /// Append a tab on `path` and make it active. Return that path.
+    pub fn open_tab(&mut self, path: impl Into<String>) -> &str {
+        self.paths.push(path.into());
         self.active = self.paths.len() - 1;
         &self.paths[self.active]
     }
@@ -156,6 +161,14 @@ mod tests {
         tabs.set_active_path("C:\\d");
         assert_eq!(tabs.active_path(), "C:\\d");
         assert_eq!(tabs.paths()[1], "C:\\c");
+    }
+
+    #[test]
+    fn open_tab_appends_its_path_and_activates_it() {
+        let mut tabs = PaneTabs::start("C:\\a");
+        assert_eq!(tabs.open_tab("D:\\closed"), "D:\\closed");
+        assert_eq!(tabs.active_index(), 1);
+        assert_eq!(tabs.paths(), ["C:\\a", "D:\\closed"]);
     }
 
     #[test]
