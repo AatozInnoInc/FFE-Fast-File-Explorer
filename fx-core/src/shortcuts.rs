@@ -3,9 +3,12 @@
 //! Built-in chords stay until the user changes them. The file stores only the
 //! overrides, one `action=Chord` line each. A missing file stays missing and
 //! reads as [`ShortcutMap::builtin`]. An empty file does not parse: loading it
-//! returns [`LoadError::Parse`], not the builtin map. Callers store only when
-//! there is at least one override. [`ShortcutMap::store`] of a map with no
-//! overrides writes an empty string, and that empty file fails to load.
+//! returns [`LoadError::Parse`], not the builtin map. [`ShortcutMap::store`]
+//! of a map with no overrides removes the file, so a stored map always loads.
+//!
+//! A chord must hold Ctrl or Alt unless its key is a function key. The window
+//! reads chords before the focused edit control does, so a bare letter or a
+//! Shift+letter chord would stop the user typing that character.
 //!
 //! This map does not decide frecency, themes, or eviction. Pressing Enter to
 //! submit the address bar is not a shortcut here. That key applies only while
@@ -30,6 +33,10 @@ const VK_DOWN: u16 = 0x28;
 const VK_F5: u16 = 0x74;
 /// Win32 `VK_F6`.
 const VK_F6: u16 = 0x75;
+/// Win32 `VK_F1` through `VK_F24`.
+const FUNCTION_KEYS: std::ops::RangeInclusive<u16> = 0x70..=0x87;
+/// Prefix for a virtual key written as four hex digits, such as `VK0024`.
+const VK_HEX_PREFIX: &str = "VK";
 
 /// A command the shell can bind to a chord.
 ///
@@ -61,8 +68,12 @@ pub enum Action {
 }
 
 impl Action {
+    /// How many actions exist. Sizes [`ShortcutMap`] so a new action only
+    /// needs a variant, an entry in [`Self::ALL`], a name, and a builtin chord.
+    pub const COUNT: usize = Self::ALL.len();
+
     /// Enum order. [`Self::index`] matches this position.
-    const ALL: [Self; 11] = [
+    pub const ALL: [Self; 11] = [
         Self::Back,
         Self::Forward,
         Self::FocusAddress,
@@ -76,20 +87,10 @@ impl Action {
         Self::ReopenTab,
     ];
 
+    /// Position in [`Self::ALL`]. The variants carry no explicit
+    /// discriminant, so declaration order is the index.
     const fn index(self) -> usize {
-        match self {
-            Self::Back => 0,
-            Self::Forward => 1,
-            Self::FocusAddress => 2,
-            Self::TogglePane => 3,
-            Self::NewTab => 4,
-            Self::CloseTab => 5,
-            Self::NextTab => 6,
-            Self::PreviousTab => 7,
-            Self::Refresh => 8,
-            Self::Parent => 9,
-            Self::ReopenTab => 10,
-        }
+        self as usize
     }
 
     fn name(self) -> &'static str {
@@ -153,13 +154,21 @@ impl fmt::Display for Chord {
     }
 }
 
+impl Chord {
+    /// True when the chord holds Ctrl or Alt, or its key is F1 through F24.
+    /// Anything else would be typed text in the address bar or search box.
+    pub fn is_bindable(&self) -> bool {
+        self.ctrl || self.alt || FUNCTION_KEYS.contains(&self.virtual_key)
+    }
+}
+
 /// One chord per [`Action`].
 ///
 /// Built-in chords stay in place until [`Self::rebind`] or a parsed override
 /// replaces them. Two actions never share a chord.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShortcutMap {
-    chords: [Chord; 11],
+    chords: [Chord; Action::COUNT],
 }
 
 impl ShortcutMap {
@@ -189,9 +198,13 @@ impl ShortcutMap {
     /// Replace this action's chord.
     ///
     /// Returns [`RebindError::ChordInUse`] when another action already has
-    /// `chord`. The map is unchanged on error. Binding an action to the chord
-    /// it already has succeeds.
+    /// `chord`, and [`RebindError::Unbindable`] when [`Chord::is_bindable`] is
+    /// false. The map is unchanged on error. Binding an action to the chord it
+    /// already has succeeds.
     pub fn rebind(&mut self, action: Action, chord: Chord) -> Result<(), RebindError> {
+        if !chord.is_bindable() {
+            return Err(RebindError::Unbindable);
+        }
         match self.lookup(chord) {
             Some(owner) if owner != action => return Err(RebindError::ChordInUse(owner)),
             Some(_) => return Ok(()),
@@ -207,7 +220,9 @@ impl ShortcutMap {
     /// [`Action`] and are case-sensitive. Chord words are case-insensitive.
     /// Modifiers, when present, stay in the order Ctrl, Alt, Shift, then the
     /// key. Letters are one ASCII letter. Named keys are Left, Right, Up,
-    /// Down, Tab, F5, and F6.
+    /// Down, Tab, F5, and F6. Any other key is `VK` plus four hex digits, the
+    /// same text [`Chord`] displays, so every stored chord parses again.
+    /// A chord that fails [`Chord::is_bindable`] is [`ParseError::BadChord`].
     ///
     /// Empty or whitespace-only text is an error. A blank line is ignored.
     /// Unknown action, bad chord, duplicate action, or duplicate chord is an
@@ -218,7 +233,7 @@ impl ShortcutMap {
             return Err(ParseError::Empty);
         }
         let mut map = Self::builtin();
-        let mut seen = [false; Action::ALL.len()];
+        let mut seen = [false; Action::COUNT];
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() {
@@ -254,12 +269,18 @@ impl ShortcutMap {
     /// Writes one `action=Chord` line per override, each with a trailing newline.
     ///
     /// Actions stay in enum order. Chords use the canonical [`Chord`] display.
-    /// When nothing differs from builtin, this writes an empty string. That
-    /// empty file does not parse. Callers store only when [`Self::overrides`]
-    /// is non-empty; a missing file is how the builtin map is represented.
+    /// When nothing differs from builtin, the file is removed instead, because
+    /// a missing file is how the builtin map is represented and an empty file
+    /// does not parse. Removing a file that is already missing succeeds.
     pub fn store(&self, path: &Path) -> io::Result<()> {
-        let text: String = self
-            .overrides()
+        let overrides = self.overrides();
+        if overrides.is_empty() {
+            return match fs::remove_file(path) {
+                Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+                other => other,
+            };
+        }
+        let text: String = overrides
             .into_iter()
             .map(|(action, chord)| format!("{action}={chord}\n"))
             .collect();
@@ -286,6 +307,8 @@ pub enum RebindError {
     ///
     /// The payload is the action that owns the chord.
     ChordInUse(Action),
+    /// The chord has neither Ctrl nor Alt and is not a function key.
+    Unbindable,
 }
 
 impl fmt::Display for RebindError {
@@ -293,6 +316,9 @@ impl fmt::Display for RebindError {
         match self {
             Self::ChordInUse(action) => {
                 write!(f, "keyboard shortcut chord is already used by {action}")
+            }
+            Self::Unbindable => {
+                write!(f, "keyboard shortcut needs Ctrl or Alt, or a function key")
             }
         }
     }
@@ -447,7 +473,7 @@ fn display_other_key(virtual_key: u16, f: &mut fmt::Formatter<'_>) -> fmt::Resul
             return write!(f, "{}", char::from(byte));
         }
     }
-    write!(f, "VK{virtual_key:04X}")
+    write!(f, "{VK_HEX_PREFIX}{virtual_key:04X}")
 }
 
 fn chords_collide(chords: &[Chord]) -> bool {
@@ -498,12 +524,17 @@ fn parse_chord(text: &str) -> Result<Chord, ParseError> {
             _ => shift = true,
         }
     }
-    Ok(Chord {
+    let chord = Chord {
         ctrl,
         alt,
         shift,
         virtual_key: parse_key(key)?,
-    })
+    };
+    if chord.is_bindable() {
+        Ok(chord)
+    } else {
+        Err(ParseError::BadChord)
+    }
 }
 
 fn modifier_rank(token: &str) -> Option<u8> {
@@ -536,7 +567,21 @@ fn parse_key(token: &str) -> Result<u16, ParseError> {
             return Ok(*virtual_key);
         }
     }
-    Err(ParseError::BadChord)
+    hex_virtual_key(token).ok_or(ParseError::BadChord)
+}
+
+/// `VK` plus exactly four hex digits, as [`Chord`] displays an unnamed key.
+fn hex_virtual_key(token: &str) -> Option<u16> {
+    let prefix = token.get(..VK_HEX_PREFIX.len())?;
+    let digits = token.get(VK_HEX_PREFIX.len()..)?;
+    let well_formed = prefix.eq_ignore_ascii_case(VK_HEX_PREFIX)
+        && digits.len() == 4
+        && digits.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if well_formed {
+        u16::from_str_radix(digits, 16).ok()
+    } else {
+        None
+    }
 }
 
 fn ascii_letter(token: &str) -> Option<u16> {
@@ -582,20 +627,8 @@ mod tests {
         }
     }
 
-    fn actions() -> [Action; 11] {
-        [
-            Action::Back,
-            Action::Forward,
-            Action::FocusAddress,
-            Action::TogglePane,
-            Action::NewTab,
-            Action::CloseTab,
-            Action::NextTab,
-            Action::PreviousTab,
-            Action::Refresh,
-            Action::Parent,
-            Action::ReopenTab,
-        ]
+    fn actions() -> [Action; Action::COUNT] {
+        Action::ALL
     }
 
     fn key(virtual_key: u16) -> Chord {
@@ -838,13 +871,6 @@ mod tests {
             Err(LoadError::Parse(ParseError::Empty))
         ));
 
-        ShortcutMap::builtin().store(&path).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "");
-        assert!(matches!(
-            ShortcutMap::load(&path),
-            Err(LoadError::Parse(ParseError::Empty))
-        ));
-
         fs::write(&path, "not_an_action=Alt+Up\n").unwrap();
         assert!(matches!(
             ShortcutMap::load(&path),
@@ -891,5 +917,73 @@ mod tests {
             loaded.chord(Action::Forward),
             ShortcutMap::builtin().chord(Action::Forward)
         );
+    }
+
+    #[test]
+    fn storing_the_builtin_map_removes_the_file_so_it_loads_again() {
+        let dir = TempDir::new();
+        let path = dir.0.join("shortcuts.txt");
+        fs::write(&path, "refresh=Ctrl+R\n").unwrap();
+        ShortcutMap::builtin().store(&path).unwrap();
+        assert!(!path.exists());
+        assert_eq!(ShortcutMap::load(&path).unwrap(), ShortcutMap::builtin());
+        ShortcutMap::builtin().store(&path).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn an_unnamed_key_round_trips_through_store_and_load() {
+        let dir = TempDir::new();
+        let path = dir.0.join("shortcuts.txt");
+        let home = Chord {
+            ctrl: false,
+            alt: true,
+            shift: false,
+            virtual_key: 0x24,
+        };
+        let mut map = ShortcutMap::builtin();
+        map.rebind(Action::Parent, home).unwrap();
+        map.store(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "parent=Alt+VK0024\n");
+        assert_eq!(ShortcutMap::load(&path).unwrap(), map);
+    }
+
+    #[test]
+    fn a_malformed_hex_key_is_a_bad_chord() {
+        for text in ["Alt+VK24", "Alt+VK00G4", "Alt+VK000024", "Alt+VK"] {
+            assert_eq!(
+                ShortcutMap::parse(&format!("parent={text}")).unwrap_err(),
+                ParseError::BadChord,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_chord_without_ctrl_or_alt_must_be_a_function_key() {
+        for text in ["D", "Shift+D", "Left", "Tab", "VK0030"] {
+            assert_eq!(
+                ShortcutMap::parse(&format!("refresh={text}")).unwrap_err(),
+                ParseError::BadChord,
+                "{text}"
+            );
+        }
+        let mut map = ShortcutMap::builtin();
+        let before = map;
+        assert_eq!(
+            map.rebind(Action::Refresh, key(0x44)),
+            Err(RebindError::Unbindable)
+        );
+        assert_eq!(map, before);
+        let f2 = key(0x71);
+        assert_eq!(map.rebind(Action::Refresh, f2), Ok(()));
+        assert_eq!(map.chord(Action::Refresh), f2);
+    }
+
+    #[test]
+    fn index_matches_the_position_in_all() {
+        for (position, action) in Action::ALL.into_iter().enumerate() {
+            assert_eq!(action.index(), position, "{action}");
+        }
     }
 }

@@ -155,6 +155,8 @@ const EM_SETSEL: u32 = 0x00B1;
 /// Width of the Timeout button. Not a performance budget.
 const TIMEOUT_WIDTH: i32 = 84;
 const NETWORK_LABEL: &str = "Network";
+/// Shortcut overrides, beside the settings file.
+const SHORTCUTS_FILE: &str = "rapid-explorer-shortcuts.txt";
 const CLASS_NAME: windows_sys::core::PCWSTR = w!("RapidExplorerList");
 
 struct ListWindow {
@@ -807,6 +809,8 @@ fn intercept(message: &MSG) -> bool {
     true
 }
 
+/// The chord for a key-down message, read with the live modifier state.
+/// A bare modifier key is not a chord.
 fn message_chord(message: &MSG) -> Option<Chord> {
     if message.message != WM_KEYDOWN && message.message != WM_SYSKEYDOWN {
         return None;
@@ -823,6 +827,7 @@ fn message_chord(message: &MSG) -> Option<Chord> {
     })
 }
 
+/// Dispatch one [`Action`] from the [`ShortcutMap`]. Every action has a handler.
 fn run_shortcut(hwnd: HWND, action: Action) {
     match action {
         Action::Back => go_back(hwnd),
@@ -860,12 +865,24 @@ fn refresh_active(hwnd: HWND) {
     request_navigation(hwnd, path, NavKind::Refresh);
 }
 
+/// Overrides from `rapid-explorer-shortcuts.txt` beside the settings file.
+/// A file that cannot be read or parsed is reported and the builtin chords
+/// are used, so a typo never leaves the window without shortcuts.
 fn load_shortcuts(settings_file: &std::path::Path) -> ShortcutMap {
     let path = settings_file
         .parent()
         .unwrap_or_else(|| std::path::Path::new(""))
-        .join("rapid-explorer-shortcuts.txt");
-    ShortcutMap::load(&path).unwrap_or_else(|_| ShortcutMap::builtin())
+        .join(SHORTCUTS_FILE);
+    match ShortcutMap::load(&path) {
+        Ok(map) => map,
+        Err(err) => {
+            eprintln!(
+                "list_shell ignored {} and kept the builtin shortcuts: {err}",
+                path.display()
+            );
+            ShortcutMap::builtin()
+        }
+    }
 }
 
 fn is_address(hwnd: HWND, candidate: HWND) -> bool {
@@ -3381,14 +3398,21 @@ fn focus_address(hwnd: HWND) {
     }
 }
 
+/// True when `vk` is held. `GetKeyState` reads modifier state, so Ctrl, Alt,
+/// and Shift are checked here instead of as the `WM_KEYDOWN` key.
 fn key_down(vk: u16) -> bool {
     unsafe { GetKeyState(i32::from(vk)) < 0 }
 }
 
+/// True when this `WM_KEYDOWN` is an auto-repeat. Bit 30 of `lParam` is the
+/// previous state of the key.
 fn key_repeat(lparam: LPARAM) -> bool {
     lparam & (1 << 30) != 0
 }
 
+/// Rewrite one pane's tab titles from its remembered paths and select the
+/// active tab. `TCM_SETCURSEL` can send `TCN_SELCHANGE`; [`on_tab_change`]
+/// ignores that notice when the index is already active.
 fn refill_tabs(hwnd: HWND, id: PaneId) {
     let Some((strip, titles, active)) = state_mut(hwnd).map(|state| {
         let pane = pane_ref(state, id);
@@ -3405,6 +3429,8 @@ fn refill_tabs(hwnd: HWND, id: PaneId) {
     tab_strip::refill(strip, &titles, active);
 }
 
+/// [`Action::NewTab`] on the active pane. The new tab copies that pane's
+/// active path. The list stays on the path it is already showing.
 fn new_active_tab(hwnd: HWND) {
     let Some(id) = state_mut(hwnd).map(|state| state.panes.active()) else {
         return;
@@ -3417,6 +3443,9 @@ fn new_active_tab(hwnd: HWND) {
     refill_tabs(hwnd, id);
 }
 
+/// [`Action::CloseTab`] on the active pane. The only tab stays open. When the
+/// neighbor path differs from the path on screen, that path is listed through
+/// [`request_navigation`]. The closed path is remembered for [`Action::ReopenTab`].
 fn close_active_tab(hwnd: HWND) {
     let Some(id) = state_mut(hwnd).map(|state| state.panes.active()) else {
         return;
@@ -3454,6 +3483,8 @@ fn reopen_closed_tab(hwnd: HWND) {
     request_navigation(hwnd, path, NavKind::Push);
 }
 
+/// [`Action::NextTab`] on the active pane, or [`Action::PreviousTab`] when
+/// `backward` is set. The next index wraps around the strip.
 fn cycle_active_tab(hwnd: HWND, backward: bool) {
     let Some(id) = state_mut(hwnd).map(|state| state.panes.active()) else {
         return;
@@ -3480,6 +3511,8 @@ fn cycle_active_tab(hwnd: HWND, backward: bool) {
     choose_tab(hwnd, id, index);
 }
 
+/// Activate `index` on `id`, focus that pane, and list the tab's path.
+/// A missing index, or the index that is already active, leaves the pane as it is.
 fn choose_tab(hwnd: HWND, id: PaneId, index: usize) {
     let Some(path) = state_mut(hwnd).and_then(|state| {
         let pane = pane_mut(state, id);
@@ -3494,6 +3527,8 @@ fn choose_tab(hwnd: HWND, id: PaneId, index: usize) {
     request_navigation(hwnd, path, NavKind::Restore);
 }
 
+/// `TCN_SELCHANGE` from a tab strip. A selection that is already the active
+/// tab is ignored, so refilling the strip does not list the directory again.
 fn on_tab_change(hwnd: HWND, lparam: LPARAM) {
     let header = unsafe { &*(lparam as *const NMHDR) };
     let Some(id) = tab_strip::pane_for(header.idFrom as isize) else {

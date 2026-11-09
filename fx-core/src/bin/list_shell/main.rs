@@ -4,7 +4,6 @@
 //! does not use a C ABI. On a cache hit the owner-data count is set, and the
 //! window paints, before the first `poll`.
 
-mod address_focus;
 mod cell;
 mod closed_tabs;
 mod column_sort;
