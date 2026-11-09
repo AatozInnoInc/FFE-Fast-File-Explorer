@@ -136,7 +136,7 @@ const NOTICE_HEIGHT: i32 = 18;
 const SS_LEFT: WINDOW_STYLE = 0x0000;
 /// `SS_CENTERIMAGE`. The single line sits in the vertical middle.
 const SS_CENTERIMAGE: WINDOW_STYLE = 0x0200;
-/// `SS_ENDELLIPSIS`. A long path ends with "...".
+/// `SS_ENDELLIPSIS`. Text wider than a narrow pane ends with "...".
 const SS_ENDELLIPSIS: WINDOW_STYLE = 0x4000;
 /// `SS_NOPREFIX`. An `&` in a path is not an accelerator.
 const SS_NOPREFIX: WINDOW_STYLE = 0x0080;
@@ -1669,22 +1669,21 @@ fn resort_pane(pane: &mut PaneView) {
 }
 
 fn apply_notice(hwnd: HWND, id: PaneId, update: NoticeUpdate) {
-    let Some((label, next, changed)) = state_mut(hwnd).map(|state| {
+    let Some((label, next, changed, path)) = state_mut(hwnd).map(|state| {
         let pane = pane_mut(state, id);
-        let changed = match update {
-            NoticeUpdate::Set(notice) => pane.notice != Some(notice),
-            NoticeUpdate::Clear => pane.notice.is_some(),
-            NoticeUpdate::Keep => false,
-        };
-        match update {
-            NoticeUpdate::Set(notice) => pane.notice = Some(notice),
-            NoticeUpdate::Clear => pane.notice = None,
-            NoticeUpdate::Keep => {}
-        }
-        (pane.notice_label, pane.notice, changed)
+        let changed = update.apply(&mut pane.notice);
+        (
+            pane.notice_label,
+            pane.notice,
+            changed,
+            pane.current.clone(),
+        )
     }) else {
         return;
     };
+    if changed {
+        eprintln!("list_shell {id:?} pane notice is now {next:?} for {path}");
+    }
     match next {
         Some(notice) => {
             set_control_text(label, notice.label());
@@ -1696,6 +1695,30 @@ fn apply_notice(hwnd: HWND, id: PaneId, update: NoticeUpdate) {
     }
     if changed {
         fit_panes(hwnd);
+    }
+}
+
+/// One pane's column below the navigation bar: tab strip, then the notice
+/// band (zero high while clear), then the list in whatever height remains.
+#[derive(Clone, Copy)]
+struct PaneColumn {
+    x: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+}
+
+impl PaneColumn {
+    fn fit(self, tabs: HWND, notice: HWND, notice_height: i32, list: HWND) {
+        let tab_height = tab_strip::TAB_HEIGHT;
+        let notice_top = self.top + tab_height;
+        let list_top = notice_top + notice_height;
+        let list_height = (self.height - tab_height - notice_height).max(0);
+        unsafe {
+            MoveWindow(tabs, self.x, self.top, self.width, tab_height, 1);
+            MoveWindow(notice, self.x, notice_top, self.width, notice_height, 1);
+            MoveWindow(list, self.x, list_top, self.width, list_height, 1);
+        }
     }
 }
 
@@ -2762,49 +2785,19 @@ fn fit_panes(hwnd: HWND) {
         let lists = (width - tree_width - NAV_GAP).max(0);
         let left_width = lists / 2;
         let right_width = lists - left_width;
-        let tab_height = tab_strip::TAB_HEIGHT;
         MoveWindow(tree, 0, top, tree_width, body, 1);
-        MoveWindow(left_tabs, tree_width, top, left_width, tab_height, 1);
-        let left_notice_top = top + tab_height;
-        MoveWindow(
-            left_notice,
-            tree_width,
-            left_notice_top,
-            left_width,
-            left_notice_height,
-            1,
-        );
-        let left_list_top = left_notice_top + left_notice_height;
-        let left_list_body = (body - tab_height - left_notice_height).max(0);
-        MoveWindow(
-            left,
-            tree_width,
-            left_list_top,
-            left_width,
-            left_list_body,
-            1,
-        );
-        let right_x = tree_width + left_width + NAV_GAP;
-        MoveWindow(right_tabs, right_x, top, right_width, tab_height, 1);
-        let right_notice_top = top + tab_height;
-        MoveWindow(
-            right_notice,
-            right_x,
-            right_notice_top,
-            right_width,
-            right_notice_height,
-            1,
-        );
-        let right_list_top = right_notice_top + right_notice_height;
-        let right_list_body = (body - tab_height - right_notice_height).max(0);
-        MoveWindow(
-            right,
-            right_x,
-            right_list_top,
-            right_width,
-            right_list_body,
-            1,
-        );
+        let left_column = PaneColumn {
+            x: tree_width,
+            top,
+            width: left_width,
+            height: body,
+        };
+        left_column.fit(left_tabs, left_notice, left_notice_height, left);
+        let right_column = PaneColumn {
+            x: tree_width + left_width + NAV_GAP,
+            ..left_column
+        };
+        right_column.fit(right_tabs, right_notice, right_notice_height, right);
         size_columns(left, left_width);
         size_columns(right, right_width);
     }

@@ -35,6 +35,21 @@ pub enum NoticeUpdate {
     Keep,
 }
 
+impl NoticeUpdate {
+    /// Apply this update to the notice a pane stores. True when the stored
+    /// notice changed, so the caller re-lays out the pane only when needed.
+    pub fn apply(self, notice: &mut Option<PaneNotice>) -> bool {
+        let next = match self {
+            Self::Set(set) => Some(set),
+            Self::Clear => None,
+            Self::Keep => *notice,
+        };
+        let changed = next != *notice;
+        *notice = next;
+        changed
+    }
+}
+
 /// Timed out sets [`PaneNotice::NotResponding`]. Every other open error,
 /// including a busy volume, leaves the notice as it was.
 pub fn notice_on_open_error(err: &EnumError) -> NoticeUpdate {
@@ -64,6 +79,20 @@ pub fn notice_on_listing(event: &ListingEvent) -> NoticeUpdate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apply_reports_a_change_only_when_the_notice_moves() {
+        let mut notice = None;
+        assert!(!NoticeUpdate::Keep.apply(&mut notice));
+        assert!(!NoticeUpdate::Clear.apply(&mut notice));
+        assert_eq!(notice, None);
+        assert!(NoticeUpdate::Set(PaneNotice::NotResponding).apply(&mut notice));
+        assert!(!NoticeUpdate::Set(PaneNotice::NotResponding).apply(&mut notice));
+        assert!(!NoticeUpdate::Keep.apply(&mut notice));
+        assert_eq!(notice, Some(PaneNotice::NotResponding));
+        assert!(NoticeUpdate::Clear.apply(&mut notice));
+        assert_eq!(notice, None);
+    }
 
     #[test]
     fn not_responding_label_is_the_pane_text() {
