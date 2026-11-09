@@ -8,6 +8,8 @@
 
 use fx_core::{FileEntry, ListingEvent, TryEvent};
 
+use std::collections::HashSet;
+
 use crate::column_sort::{sort_entries, RowSort};
 
 /// What the owner-data control needs after one or more listing events.
@@ -28,6 +30,10 @@ pub struct DirectoryRows {
     settled: bool,
     /// Last `Finished` or `TimedOut` the pane notice has not read.
     terminal: Option<ListingEvent>,
+    /// Order for `shown`. Batches and a finished revalidation are sorted
+    /// before they are shown or compared, so a cache hit that did not change
+    /// still reads as unchanged.
+    sort: Option<RowSort>,
 }
 
 impl DirectoryRows {
@@ -40,6 +46,7 @@ impl DirectoryRows {
                 from_cache: true,
                 settled: false,
                 terminal: None,
+                sort: None,
             },
             None => Self {
                 shown: Vec::new(),
@@ -47,6 +54,7 @@ impl DirectoryRows {
                 from_cache: false,
                 settled: false,
                 terminal: None,
+                sort: None,
             },
         }
     }
@@ -55,9 +63,43 @@ impl DirectoryRows {
         &self.shown
     }
 
-    /// Sort the rows already listed. Incoming batches stay in arrival order until they are shown.
-    pub fn sort_shown(&mut self, sort: RowSort) {
+    /// Keep `shown` in `sort` order from now on, and sort what is shown now.
+    pub fn set_sort(&mut self, sort: RowSort) {
+        self.sort = Some(sort);
         sort_entries(&mut self.shown, sort);
+    }
+
+    /// True while a sort is set and the listing can still reorder `shown`.
+    pub fn may_reorder(&self) -> bool {
+        self.sort.is_some() && !self.settled
+    }
+
+    /// Names at `indexes` in `shown`. Out-of-range indexes are skipped.
+    pub fn names_at(&self, indexes: &[usize]) -> Vec<String> {
+        indexes
+            .iter()
+            .filter_map(|&index| self.shown.get(index))
+            .map(|entry| entry.name.clone())
+            .collect()
+    }
+
+    /// Indexes in `shown` of the entries named in `names`, ascending. Names
+    /// that are no longer listed are skipped. Used to keep a selection on the
+    /// same files after the rows reorder.
+    pub fn indexes_of(&self, names: &[String]) -> Vec<usize> {
+        let wanted: HashSet<&str> = names.iter().map(String::as_str).collect();
+        self.shown
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| wanted.contains(entry.name.as_str()))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn sort_in_place(sort: Option<RowSort>, entries: &mut [FileEntry]) {
+        if let Some(sort) = sort {
+            sort_entries(entries, sort);
+        }
     }
 
     pub fn is_settled(&self) -> bool {
@@ -119,6 +161,7 @@ impl DirectoryRows {
                     RowChange::Unchanged
                 } else {
                     self.shown.extend(batch);
+                    Self::sort_in_place(self.sort, &mut self.shown);
                     RowChange::Count
                 }
             }
@@ -128,6 +171,7 @@ impl DirectoryRows {
                 if !self.from_cache {
                     return RowChange::Unchanged;
                 }
+                Self::sort_in_place(self.sort, &mut self.incoming);
                 let change = if self.incoming == self.shown {
                     RowChange::Unchanged
                 } else if self.incoming.len() == self.shown.len() {
@@ -315,5 +359,64 @@ mod tests {
             RowChange::Unchanged
         );
         assert_eq!(names(&rows), ["cached"]);
+    }
+
+    fn by_name() -> RowSort {
+        RowSort {
+            column: crate::column_sort::SortColumn::Name,
+            dir: crate::column_sort::SortDir::Asc,
+        }
+    }
+
+    #[test]
+    fn a_sorted_miss_keeps_every_batch_in_order() {
+        let mut rows = DirectoryRows::from_cached(None);
+        rows.set_sort(by_name());
+        rows.apply(ListingEvent::Batch(vec![entry("c"), entry("a")]));
+        assert_eq!(names(&rows), ["a", "c"]);
+        rows.apply(ListingEvent::Batch(vec![entry("b")]));
+        assert_eq!(names(&rows), ["a", "b", "c"]);
+        assert!(rows.may_reorder());
+        rows.apply(ListingEvent::Finished);
+        assert!(!rows.may_reorder());
+    }
+
+    #[test]
+    fn a_sorted_cache_hit_that_did_not_change_stays_unchanged() {
+        let mut rows = DirectoryRows::from_cached(Some(vec![entry("b"), entry("a")]));
+        rows.set_sort(by_name());
+        assert_eq!(names(&rows), ["a", "b"]);
+        rows.apply(ListingEvent::Batch(vec![entry("b"), entry("a")]));
+        assert_eq!(rows.apply(ListingEvent::Finished), RowChange::Unchanged);
+        assert_eq!(names(&rows), ["a", "b"]);
+    }
+
+    #[test]
+    fn a_sorted_cache_hit_that_changed_is_shown_sorted() {
+        let mut rows = DirectoryRows::from_cached(Some(vec![entry("b"), entry("a")]));
+        rows.set_sort(by_name());
+        rows.apply(ListingEvent::Batch(vec![
+            entry("c"),
+            entry("a"),
+            entry("b"),
+        ]));
+        assert_eq!(rows.apply(ListingEvent::Finished), RowChange::Count);
+        assert_eq!(names(&rows), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn without_a_sort_rows_never_reorder() {
+        let rows = DirectoryRows::from_cached(None);
+        assert!(!rows.may_reorder());
+    }
+
+    #[test]
+    fn a_selection_follows_its_names_across_a_reorder() {
+        let mut rows = DirectoryRows::from_cached(Some(vec![entry("c"), entry("a"), entry("b")]));
+        let selected = rows.names_at(&[0, 2, 99]);
+        assert_eq!(selected, ["c", "b"]);
+        rows.set_sort(by_name());
+        assert_eq!(rows.indexes_of(&selected), [1, 2]);
+        assert_eq!(rows.indexes_of(&["gone".to_string()]), Vec::<usize>::new());
     }
 }
