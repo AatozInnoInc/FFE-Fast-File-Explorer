@@ -21,6 +21,7 @@ impl PaneTabs {
         }
     }
 
+    /// Path of the active tab.
     pub fn active_path(&self) -> &str {
         &self.paths[self.active]
     }
@@ -32,14 +33,17 @@ impl PaneTabs {
         }
     }
 
+    /// Index of the active tab.
     pub fn active_index(&self) -> usize {
         self.active
     }
 
+    /// How many tabs this pane has. A pane always has at least one.
     pub fn len(&self) -> usize {
         self.paths.len()
     }
 
+    /// Paths in tab order. The active path is at [`Self::active_index`].
     pub fn paths(&self) -> &[String] {
         &self.paths
     }
