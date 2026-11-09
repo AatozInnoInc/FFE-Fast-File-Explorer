@@ -33,7 +33,8 @@ use windows_sys::Win32::Foundation::{
     GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
 use windows_sys::Win32::Graphics::Gdi::{
-    CreateSolidBrush, DeleteObject, FillRect, ScreenToClient, UpdateWindow, COLOR_WINDOW, HBRUSH,
+    FillRect, GetSysColorBrush, ScreenToClient, UpdateWindow, COLOR_HIGHLIGHT, COLOR_WINDOW,
+    HBRUSH, HDC,
 };
 use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
 use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
@@ -102,7 +103,7 @@ use crate::panes::{PaneId, Panes};
 use crate::parent_path::parent_directory;
 use crate::places::{PlaceChange, PlaceList};
 use crate::query::Query;
-use crate::reparse_mark::{reparse_badge, shows_reparse_badge};
+use crate::reparse_mark::reparse_badge;
 use crate::rows::{DirectoryRows, RowChange};
 use crate::tab_history::TabHistories;
 use crate::tab_strip;
@@ -2153,10 +2154,14 @@ fn overlay_thumb(hwnd: HWND, list: HWND, draw: &NMLVCUSTOMDRAW) -> LRESULT {
 
 /// A small square on the name icon when the row is a reparse point.
 /// Search hits are not reparse points. This does not load an overlay handler.
-fn paint_reparse_badge(hwnd: HWND, list: HWND, row: usize, hdc: *mut core::ffi::c_void) {
+///
+/// The square uses the system highlight brush, the same source `draw.rs`
+/// uses for selection, until the theme engine supplies the accent token.
+/// `GetSysColorBrush` returns a cached brush, so nothing is allocated or
+/// freed per painted row.
+fn paint_reparse_badge(hwnd: HWND, list: HWND, row: usize, hdc: HDC) {
     let reparse = state_mut(hwnd).is_some_and(|state| {
-        visible_entry(state, list, row)
-            .is_some_and(|entry| shows_reparse_badge(entry.is_reparse_point))
+        visible_entry(state, list, row).is_some_and(|entry| entry.is_reparse_point)
     });
     if !reparse {
         return;
@@ -2174,10 +2179,9 @@ fn paint_reparse_badge(hwnd: HWND, list: HWND, row: usize, hdc: *mut core::ffi::
         bottom: badge.bottom,
     };
     unsafe {
-        let brush = CreateSolidBrush(0x0000_80FF);
+        let brush = GetSysColorBrush(COLOR_HIGHLIGHT);
         if !brush.is_null() {
             FillRect(hdc, &rect, brush);
-            let _ = DeleteObject(brush);
         }
     }
 }
