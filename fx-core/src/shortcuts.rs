@@ -93,6 +93,7 @@ impl Action {
         self as usize
     }
 
+    /// The snake_case name used on the left of `action=Chord` in the file.
     fn name(self) -> &'static str {
         match self {
             Self::Back => "back",
@@ -109,6 +110,7 @@ impl Action {
         }
     }
 
+    /// The action whose [`Self::name`] is exactly `name`. Case-sensitive.
     fn from_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|action| action.name() == name)
     }
@@ -126,8 +128,11 @@ impl fmt::Display for Action {
 /// the uppercase letter (`D` is `0x44`). This struct does not link Win32.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Chord {
+    /// Ctrl is held.
     pub ctrl: bool,
+    /// Alt is held. Win32 reports it as `VK_MENU`.
     pub alt: bool,
+    /// Shift is held.
     pub shift: bool,
     /// Virtual-key code, such as `0x25` for Left or `0x09` for Tab.
     pub virtual_key: u16,
@@ -138,8 +143,8 @@ impl fmt::Display for Chord {
     ///
     /// Letters are one uppercase ASCII letter. Named keys are `Left`, `Right`,
     /// `Up`, `Down`, `Tab`, `F5`, and `F6`. Any other virtual key is written
-    /// `VK` plus four uppercase hex digits. [`ShortcutMap::parse`] accepts the
-    /// letter and named-key forms only.
+    /// `VK` plus four uppercase hex digits. [`ShortcutMap::parse`] accepts all
+    /// three forms, so every displayed chord parses back to the same chord.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.ctrl {
             f.write_str("Ctrl+")?;
@@ -361,7 +366,9 @@ impl std::error::Error for ParseError {}
 /// [`ShortcutMap::load`] failed.
 #[derive(Debug)]
 pub enum LoadError {
+    /// The file exists but could not be read.
     Io(io::Error),
+    /// The file was read but its text is not a valid override list.
     Parse(ParseError),
 }
 
@@ -383,6 +390,8 @@ impl std::error::Error for LoadError {
     }
 }
 
+/// The chord `action` has until the user overrides it. Each default is also
+/// listed on its [`Action`] variant.
 fn builtin_chord(action: Action) -> Chord {
     match action {
         Action::Back => Chord {
@@ -454,6 +463,7 @@ fn builtin_chord(action: Action) -> Chord {
     }
 }
 
+/// Write the key part of a chord: a named key, else [`display_other_key`].
 fn display_key(virtual_key: u16, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match virtual_key {
         VK_LEFT => f.write_str("Left"),
@@ -467,6 +477,8 @@ fn display_key(virtual_key: u16, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     }
 }
 
+/// Write an uppercase letter as itself and any other key as `VK` plus four
+/// hex digits, the form [`hex_virtual_key`] reads back.
 fn display_other_key(virtual_key: u16, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     if let Ok(byte) = u8::try_from(virtual_key) {
         if byte.is_ascii_uppercase() {
@@ -476,6 +488,7 @@ fn display_other_key(virtual_key: u16, f: &mut fmt::Formatter<'_>) -> fmt::Resul
     write!(f, "{VK_HEX_PREFIX}{virtual_key:04X}")
 }
 
+/// True when any two entries in `chords` are equal.
 fn chords_collide(chords: &[Chord]) -> bool {
     chords
         .iter()
@@ -483,6 +496,8 @@ fn chords_collide(chords: &[Chord]) -> bool {
         .any(|(index, chord)| chords[index + 1..].contains(chord))
 }
 
+/// One trimmed, non-blank `action=Chord` line. Whitespace around either side
+/// of `=` is ignored.
 fn parse_line(line: &str) -> Result<(Action, Chord), ParseError> {
     let Some((action_text, chord_text)) = line.split_once('=') else {
         return Err(ParseError::Invalid);
@@ -497,6 +512,9 @@ fn parse_line(line: &str) -> Result<(Action, Chord), ParseError> {
     Ok((action, chord))
 }
 
+/// `Ctrl+Alt+Shift+Key` text into a [`Chord`]. Modifiers are optional but must
+/// appear in that order, at most once each. Empty parts, an unknown key, or a
+/// chord that fails [`Chord::is_bindable`] are [`ParseError::BadChord`].
 fn parse_chord(text: &str) -> Result<Chord, ParseError> {
     if text.is_empty() {
         return Err(ParseError::BadChord);
@@ -537,6 +555,8 @@ fn parse_chord(text: &str) -> Result<Chord, ParseError> {
     }
 }
 
+/// Position of a modifier word in the required order: Ctrl 1, Alt 2, Shift 3.
+/// Case-insensitive. None for anything else.
 fn modifier_rank(token: &str) -> Option<u8> {
     if token.eq_ignore_ascii_case("ctrl") {
         Some(1)
@@ -549,10 +569,13 @@ fn modifier_rank(token: &str) -> Option<u8> {
     }
 }
 
+/// The virtual key for the last part of a chord: one ASCII letter, a named
+/// key (case-insensitive), or the `VKxxxx` form.
 fn parse_key(token: &str) -> Result<u16, ParseError> {
     if let Some(letter) = ascii_letter(token) {
         return Ok(letter);
     }
+    // Lowercase names of the keys `display_key` writes by name.
     const NAMED: &[(&str, u16)] = &[
         ("left", VK_LEFT),
         ("right", VK_RIGHT),
@@ -584,6 +607,7 @@ fn hex_virtual_key(token: &str) -> Option<u16> {
     }
 }
 
+/// The uppercase ASCII code when `token` is exactly one ASCII letter.
 fn ascii_letter(token: &str) -> Option<u16> {
     let mut bytes = token.bytes();
     let byte = bytes.next()?;
@@ -942,9 +966,9 @@ mod tests {
             virtual_key: 0x24,
         };
         let mut map = ShortcutMap::builtin();
-        map.rebind(Action::Parent, home).unwrap();
+        map.rebind(Action::Refresh, home).unwrap();
         map.store(&path).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "parent=Alt+VK0024\n");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "refresh=Alt+VK0024\n");
         assert_eq!(ShortcutMap::load(&path).unwrap(), map);
     }
 
@@ -952,7 +976,7 @@ mod tests {
     fn a_malformed_hex_key_is_a_bad_chord() {
         for text in ["Alt+VK24", "Alt+VK00G4", "Alt+VK000024", "Alt+VK"] {
             assert_eq!(
-                ShortcutMap::parse(&format!("parent={text}")).unwrap_err(),
+                ShortcutMap::parse(&format!("refresh={text}")).unwrap_err(),
                 ParseError::BadChord,
                 "{text}"
             );
