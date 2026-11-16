@@ -5,6 +5,7 @@
 //! window paints, before the first `poll`.
 
 mod cell;
+mod closed_tabs;
 mod column_sort;
 mod columns;
 mod commands;

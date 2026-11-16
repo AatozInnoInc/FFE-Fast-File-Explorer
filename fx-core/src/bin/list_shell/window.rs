@@ -88,6 +88,7 @@ use fx_core::VolumeKind;
 use fx_core::{EnumError, NetworkBrowse, NetworkPlace, OpenedDirectory, Path, Shell, VolumeId};
 
 use crate::cell;
+use crate::closed_tabs::ClosedTabs;
 use crate::column_sort::{RowSort, SortColumn, SortDir};
 use crate::columns;
 use crate::commands::{self, Command};
@@ -232,6 +233,8 @@ struct PaneView {
     notice_label: HWND,
     /// Order of the rows already listed. Search hits are not sorted.
     sort: Option<RowSort>,
+    /// Paths of tabs closed in this pane. Most recent last. Eviction: TODO, define.
+    closed: ClosedTabs,
 }
 
 struct ThumbJob {
@@ -550,6 +553,7 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
             notice: None,
             notice_label: left_notice,
             sort: None,
+            closed: ClosedTabs::new(),
         },
         right: PaneView {
             list: right_list,
@@ -568,6 +572,7 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
             notice: None,
             notice_label: right_notice,
             sort: None,
+            closed: ClosedTabs::new(),
         },
         tree,
         back,
@@ -796,7 +801,12 @@ fn intercept(message: &MSG) -> bool {
     let Some(action) = state_mut(root).and_then(|state| state.shortcuts.lookup(chord)) else {
         return false;
     };
-    if key_repeat(message.lParam) && matches!(action, Action::NewTab | Action::CloseTab) {
+    if key_repeat(message.lParam)
+        && matches!(
+            action,
+            Action::NewTab | Action::CloseTab | Action::ReopenTab
+        )
+    {
         return true;
     }
     run_shortcut(root, action);
@@ -834,6 +844,7 @@ fn run_shortcut(hwnd: HWND, action: Action) {
         Action::PreviousTab => cycle_active_tab(hwnd, true),
         Action::Refresh => refresh_active(hwnd),
         Action::Parent => go_parent(hwnd),
+        Action::ReopenTab => reopen_closed_tab(hwnd),
     }
 }
 
@@ -3561,7 +3572,9 @@ fn close_active_tab(hwnd: HWND) {
     };
     let Some(path) = state_mut(hwnd).and_then(|state| {
         let pane = pane_mut(state, id);
+        let closed_path = pane.history.current().to_string();
         let path = pane.history.close_active().map(str::to_string)?;
+        pane.closed.remember(&closed_path);
         let _ = pane.tabs.close_active();
         Some(path)
     }) else {
@@ -3572,6 +3585,24 @@ fn close_active_tab(hwnd: HWND) {
     if current.as_deref() != Some(path.as_str()) {
         request_navigation(hwnd, path, NavKind::Restore);
     }
+}
+
+/// [`Action::ReopenTab`] on the active pane: open the most recently closed
+/// path as a new tab and list it. The tab starts on that path with no Back,
+/// like a fresh tab, so Back never leads to the tab that was active before.
+fn reopen_closed_tab(hwnd: HWND) {
+    let Some((id, path)) = state_mut(hwnd).and_then(|state| {
+        let id = state.panes.active();
+        let pane = pane_mut(state, id);
+        let path = pane.closed.reopen()?;
+        pane.history.open_tab(path.as_str());
+        pane.tabs.open_tab(path.as_str());
+        Some((id, path))
+    }) else {
+        return;
+    };
+    refill_tabs(hwnd, id);
+    request_navigation(hwnd, path, NavKind::Restore);
 }
 
 /// Ctrl+Tab on the active pane, or Ctrl+Shift+Tab when `backward` is set.

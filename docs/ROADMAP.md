@@ -48,6 +48,7 @@ The next substantial capability step.
 - [x] Column headers sort the rows already listed by name, size, or date modified. Equal keys keep their order. The header shows the sort arrow. Selected files stay selected when rows reorder. An unchanged cache hit does not repaint. Search hits are not sorted (`done`)
 - [x] A tree child whose path text repeats the node or an ancestor is not inserted. Reparse targets are not followed, so a junction back to an ancestor under another name is not caught yet (`done`)
 - [x] A reparse point draws a small square on its name icon in the system highlight color. Search hits do not. There is no shell overlay (`done`)
+- [x] Ctrl+Shift+T reopens the most recently closed tab in that pane, starting on that path with no Back. The closed-tab stack is unbounded. Eviction is TODO: define (`done`)
 
 ## Future / parking lot
 
