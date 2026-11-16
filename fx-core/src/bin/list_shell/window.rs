@@ -1818,6 +1818,8 @@ fn set_count(list: HWND, count: usize) {
     }
 }
 
+/// The sort column for a list subitem index. None for a column that does not
+/// sort.
 fn sort_column(subitem: i32) -> Option<SortColumn> {
     match subitem {
         columns::NAME => Some(SortColumn::Name),
@@ -1827,6 +1829,12 @@ fn sort_column(subitem: i32) -> Option<SortColumn> {
     }
 }
 
+/// `LVN_COLUMNCLICK`: sort the clicked pane's rows by that column, toggling
+/// the direction on a repeat click.
+///
+/// Ignored while the pane shows search hits. The selected files stay selected
+/// across the reorder, the header shows the sort arrow, and the visible rows
+/// are redrawn. The order is kept for this pane when it navigates.
 fn on_column_click(hwnd: HWND, lparam: LPARAM) {
     let header = unsafe { &*(lparam as *const NMLISTVIEW) };
     let list = header.hdr.hwndFrom;
