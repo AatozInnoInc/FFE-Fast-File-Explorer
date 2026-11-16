@@ -1632,6 +1632,12 @@ fn drain_node(node: &mut FolderNode) -> ChildChange {
     expansion.apply_available(|| opened.poll())
 }
 
+/// Apply every listing event that is ready for one pane, without waiting.
+///
+/// A poll that fails with [`EnumError::TimedOut`] stops the rows like any
+/// other poll error, and is also recorded with
+/// [`DirectoryRows::note_timeout`] so the pane notice can show
+/// "Not responding" on the next timer tick.
 fn drain_pane(pane: &mut PaneView) -> RowChange {
     let PaneView {
         opened,
@@ -1648,6 +1654,7 @@ fn drain_pane(pane: &mut PaneView) -> RowChange {
         rows.stop();
         return RowChange::Unchanged;
     };
+    // `apply_available` only sees a unit error, so the timeout is noted here.
     let mut timed_out = false;
     let change = rows.apply_available(|| match opened.poll() {
         Err(EnumError::TimedOut) => {
@@ -1704,6 +1711,12 @@ fn restore_selection(hwnd: HWND, id: PaneId, names: &[String]) {
     }
 }
 
+/// Apply `update` to pane `id`'s notice, then show or hide its label.
+///
+/// The Set/Clear/Keep decision lives in [`NoticeUpdate::apply`]; this only
+/// performs the Win32 side. The pane is re-laid out only when the notice
+/// changed, because the band above the list appears or disappears with it.
+/// Each change is logged with the pane and the directory it applies to.
 fn apply_notice(hwnd: HWND, id: PaneId, update: NoticeUpdate) {
     let Some((label, next, changed, path)) = state_mut(hwnd).map(|state| {
         let pane = pane_mut(state, id);
@@ -1736,15 +1749,27 @@ fn apply_notice(hwnd: HWND, id: PaneId, update: NoticeUpdate) {
 
 /// One pane's column below the navigation bar: tab strip, then the notice
 /// band (zero high while clear), then the list in whatever height remains.
+///
+/// Both panes share this layout, so [`fit_panes`] describes each column once
+/// instead of repeating the `MoveWindow` arithmetic per pane.
 #[derive(Clone, Copy)]
 struct PaneColumn {
+    /// Left edge in client pixels.
     x: i32,
+    /// Top of the tab strip, just below the navigation bar.
     top: i32,
+    /// Column width. The two panes can differ by one pixel when the space
+    /// for the lists is odd.
     width: i32,
+    /// Height from `top` to the bottom of the client area.
     height: i32,
 }
 
 impl PaneColumn {
+    /// Move the tab strip, notice label, and list into this column with
+    /// `MoveWindow`, stacked top to bottom. `notice_height` is zero while the
+    /// pane has no notice, so the list then starts right under the tabs. The
+    /// list height never goes below zero when the window is very short.
     fn fit(self, tabs: HWND, notice: HWND, notice_height: i32, list: HWND) {
         let tab_height = tab_strip::TAB_HEIGHT;
         let notice_top = self.top + tab_height;
@@ -1758,6 +1783,8 @@ impl PaneColumn {
     }
 }
 
+/// Height of the notice band: [`NOTICE_HEIGHT`] while a notice is shown,
+/// zero otherwise.
 fn notice_band(notice: Option<PaneNotice>) -> i32 {
     if notice.is_some() {
         NOTICE_HEIGHT
@@ -1766,6 +1793,8 @@ fn notice_band(notice: Option<PaneNotice>) -> i32 {
     }
 }
 
+/// Hidden child static: one line, left aligned, vertically centered, cut with
+/// an ellipsis in a narrow pane, and `&` shown as text.
 fn notice_style() -> WINDOW_STYLE {
     WS_CHILD | SS_LEFT | SS_CENTERIMAGE | SS_ENDELLIPSIS | SS_NOPREFIX
 }
@@ -2858,6 +2887,8 @@ fn fit_panes(hwnd: HWND) {
         let left_width = lists / 2;
         let right_width = lists - left_width;
         MoveWindow(tree, 0, top, tree_width, body, 1);
+        // Each pane column is tab strip, notice band, then list. The right
+        // pane takes the odd pixel when the space for the lists is odd.
         let left_column = PaneColumn {
             x: tree_width,
             top,
@@ -2867,7 +2898,9 @@ fn fit_panes(hwnd: HWND) {
         left_column.fit(left_tabs, left_notice, left_notice_height, left);
         let right_column = PaneColumn {
             x: tree_width + left_width + NAV_GAP,
-            ..left_column
+            top,
+            width: right_width,
+            height: body,
         };
         right_column.fit(right_tabs, right_notice, right_notice_height, right);
         size_columns(left, left_width);
