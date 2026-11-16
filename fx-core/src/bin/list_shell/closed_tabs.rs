@@ -8,19 +8,23 @@
 /// Closed paths. The most recent path is last.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClosedTabs {
+    /// Closed paths in the order they were closed.
     paths: Vec<String>,
 }
 
 impl ClosedTabs {
+    /// An empty stack. Each pane owns one.
     pub fn new() -> Self {
         Self { paths: Vec::new() }
     }
 
+    /// How many closed paths are remembered. Test-only.
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.paths.len()
     }
 
+    /// True when nothing can be reopened. Test-only.
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.paths.is_empty()
