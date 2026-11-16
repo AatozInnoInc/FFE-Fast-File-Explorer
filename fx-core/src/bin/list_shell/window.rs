@@ -122,8 +122,11 @@ const ID_ADDRESS: isize = 5;
 const ID_TIMEOUT: isize = 6;
 const ID_SEARCH: isize = 7;
 const ID_OTHER: isize = 9;
+/// Control id of the left pane's notice label.
 const ID_NOTICE_LEFT: isize = 12;
+/// Control id of the right pane's notice label.
 const ID_NOTICE_RIGHT: isize = 13;
+/// Height of a pane's notice band while it shows a notice. Not a performance budget.
 const NOTICE_HEIGHT: i32 = 18;
 /// `SS_LEFT`. Text starts at the left of the static control.
 const SS_LEFT: WINDOW_STYLE = 0x0000;
