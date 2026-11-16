@@ -39,22 +39,22 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{
     ImageList_Create, ImageList_ReplaceIcon, InitCommonControlsEx, CDDS_ITEMPOSTPAINT,
     CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDDS_SUBITEM, CDRF_DODEFAULT, CDRF_NOTIFYITEMDRAW,
-    CDRF_NOTIFYPOSTPAINT, CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, HIMAGELIST, HTREEITEM,
-    ICC_LISTVIEW_CLASSES, ICC_TREEVIEW_CLASSES, ILC_COLOR32, ILC_MASK, INITCOMMONCONTROLSEX,
-    I_IMAGENONE, LVCFMT_LEFT, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVHITTESTINFO,
-    LVIF_IMAGE, LVIF_STATE, LVIF_TEXT, LVIR_ICON, LVIS_SELECTED, LVITEMW, LVM_EDITLABELW,
-    LVM_GETCOUNTPERPAGE, LVM_GETITEMSTATE, LVM_GETNEXTITEM, LVM_GETSELECTEDCOUNT,
-    LVM_GETSUBITEMRECT, LVM_GETTOPINDEX, LVM_HITTEST, LVM_INSERTCOLUMNW, LVM_REDRAWITEMS,
-    LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMCOUNT,
-    LVM_SETITEMSTATE, LVNI_SELECTED, LVN_COLUMNCLICK, LVN_ENDLABELEDITW, LVN_GETDISPINFOW,
-    LVN_ITEMACTIVATE, LVSICF_NOSCROLL, LVSIL_SMALL, LVS_EDITLABELS, LVS_EX_DOUBLEBUFFER,
-    LVS_EX_FULLROWSELECT, LVS_OWNERDATA, LVS_REPORT, LVS_SHOWSELALWAYS, NMHDR, NMLISTVIEW,
-    NMLVCUSTOMDRAW, NMLVDISPINFOW, NMTREEVIEWW, NM_CUSTOMDRAW, TCM_GETCURSEL, TVE_COLLAPSE,
-    TVE_EXPAND, TVGN_CARET, TVIF_CHILDREN, TVIF_HANDLE, TVIF_PARAM, TVIF_TEXT, TVINSERTSTRUCTW,
-    TVINSERTSTRUCTW_0, TVITEMW, TVI_LAST, TVI_ROOT, TVM_DELETEITEM, TVM_INSERTITEMW,
-    TVM_SELECTITEM, TVM_SETITEMW, TVN_ITEMEXPANDINGW, TVN_SELCHANGEDW, TVS_DISABLEDRAGDROP,
-    TVS_HASBUTTONS, TVS_HASLINES, TVS_LINESATROOT, TVS_SHOWSELALWAYS, WC_BUTTONW, WC_EDITW,
-    WC_LISTVIEWW, WC_STATICW, WC_TREEVIEWW,
+    CDRF_NOTIFYPOSTPAINT, CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, HDF_SORTDOWN, HDF_SORTUP,
+    HDITEMW, HDI_FORMAT, HDM_GETITEMW, HDM_SETITEMW, HIMAGELIST, HTREEITEM, ICC_LISTVIEW_CLASSES,
+    ICC_TREEVIEW_CLASSES, ILC_COLOR32, ILC_MASK, INITCOMMONCONTROLSEX, I_IMAGENONE, LVCFMT_LEFT,
+    LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVHITTESTINFO, LVIF_IMAGE, LVIF_STATE, LVIF_TEXT,
+    LVIR_ICON, LVIS_SELECTED, LVITEMW, LVM_EDITLABELW, LVM_GETCOUNTPERPAGE, LVM_GETHEADER,
+    LVM_GETITEMSTATE, LVM_GETNEXTITEM, LVM_GETSELECTEDCOUNT, LVM_GETSUBITEMRECT, LVM_GETTOPINDEX,
+    LVM_HITTEST, LVM_INSERTCOLUMNW, LVM_REDRAWITEMS, LVM_SETCOLUMNWIDTH,
+    LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMCOUNT, LVM_SETITEMSTATE,
+    LVNI_SELECTED, LVN_COLUMNCLICK, LVN_ENDLABELEDITW, LVN_GETDISPINFOW, LVN_ITEMACTIVATE,
+    LVSICF_NOSCROLL, LVSIL_SMALL, LVS_EDITLABELS, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
+    LVS_OWNERDATA, LVS_REPORT, LVS_SHOWSELALWAYS, NMHDR, NMLISTVIEW, NMLVCUSTOMDRAW, NMLVDISPINFOW,
+    NMTREEVIEWW, NM_CUSTOMDRAW, TCM_GETCURSEL, TVE_COLLAPSE, TVE_EXPAND, TVGN_CARET, TVIF_CHILDREN,
+    TVIF_HANDLE, TVIF_PARAM, TVIF_TEXT, TVINSERTSTRUCTW, TVINSERTSTRUCTW_0, TVITEMW, TVI_LAST,
+    TVI_ROOT, TVM_DELETEITEM, TVM_INSERTITEMW, TVM_SELECTITEM, TVM_SETITEMW, TVN_ITEMEXPANDINGW,
+    TVN_SELCHANGEDW, TVS_DISABLEDRAGDROP, TVS_HASBUTTONS, TVS_HASLINES, TVS_LINESATROOT,
+    TVS_SHOWSELALWAYS, WC_BUTTONW, WC_EDITW, WC_LISTVIEWW, WC_STATICW, WC_TREEVIEWW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_MENU, VK_RETURN, VK_SHIFT,
@@ -85,7 +85,7 @@ use fx_core::VolumeKind;
 use fx_core::{EnumError, NetworkBrowse, NetworkPlace, OpenedDirectory, Path, Shell, VolumeId};
 
 use crate::cell;
-use crate::column_sort::{RowSort, SortColumn};
+use crate::column_sort::{RowSort, SortColumn, SortDir};
 use crate::columns;
 use crate::commands::{self, Command};
 use crate::draw::{self, CellRect};
@@ -132,7 +132,7 @@ const NOTICE_HEIGHT: i32 = 18;
 const SS_LEFT: WINDOW_STYLE = 0x0000;
 /// `SS_CENTERIMAGE`. The single line sits in the vertical middle.
 const SS_CENTERIMAGE: WINDOW_STYLE = 0x0200;
-/// `SS_ENDELLIPSIS`. A long path ends with "...".
+/// `SS_ENDELLIPSIS`. Text wider than a narrow pane ends with "...".
 const SS_ENDELLIPSIS: WINDOW_STYLE = 0x4000;
 /// `SS_NOPREFIX`. An `&` in a path is not an accelerator.
 const SS_NOPREFIX: WINDOW_STYLE = 0x0080;
@@ -151,6 +151,8 @@ const EM_SETSEL: u32 = 0x00B1;
 /// Width of the Timeout button. Not a performance budget.
 const TIMEOUT_WIDTH: i32 = 84;
 const NETWORK_LABEL: &str = "Network";
+/// Shortcut overrides, beside the settings file.
+const SHORTCUTS_FILE: &str = "rapid-explorer-shortcuts.txt";
 const CLASS_NAME: windows_sys::core::PCWSTR = w!("RapidExplorerList");
 
 struct ListWindow {
@@ -794,6 +796,8 @@ fn intercept(message: &MSG) -> bool {
     true
 }
 
+/// The chord for a key-down message, read with the live modifier state.
+/// A bare modifier key is not a chord.
 fn message_chord(message: &MSG) -> Option<Chord> {
     if message.message != WM_KEYDOWN && message.message != WM_SYSKEYDOWN {
         return None;
@@ -810,6 +814,7 @@ fn message_chord(message: &MSG) -> Option<Chord> {
     })
 }
 
+/// Dispatch one [`Action`] from the [`ShortcutMap`]. Every action has a handler.
 fn run_shortcut(hwnd: HWND, action: Action) {
     match action {
         Action::Back => go_back(hwnd),
@@ -825,10 +830,10 @@ fn run_shortcut(hwnd: HWND, action: Action) {
     }
 }
 
+/// [`Action::Parent`]: list the parent of the active pane's directory as a
+/// new history entry. A drive root or UNC share root has no parent.
 fn go_parent(hwnd: HWND) {
-    let Some(path) =
-        state_mut(hwnd).map(|state| pane_ref(state, state.panes.active()).current.clone())
-    else {
+    let Some(path) = active_pane_path(hwnd) else {
         return;
     };
     let Some(parent) = parent_directory(&path) else {
@@ -837,21 +842,38 @@ fn go_parent(hwnd: HWND) {
     request_navigation(hwnd, parent, NavKind::Push);
 }
 
+/// [`Action::Refresh`]: list the active pane's directory again without
+/// pushing history.
 fn refresh_active(hwnd: HWND) {
-    let Some(path) =
-        state_mut(hwnd).map(|state| pane_ref(state, state.panes.active()).current.clone())
-    else {
+    let Some(path) = active_pane_path(hwnd) else {
         return;
     };
     request_navigation(hwnd, path, NavKind::Refresh);
 }
 
+/// Directory the active pane is showing.
+fn active_pane_path(hwnd: HWND) -> Option<String> {
+    state_mut(hwnd).map(|state| pane_ref(state, state.panes.active()).current.clone())
+}
+
+/// Overrides from `rapid-explorer-shortcuts.txt` beside the settings file.
+/// A file that cannot be read or parsed is reported and the builtin chords
+/// are used, so a typo never leaves the window without shortcuts.
 fn load_shortcuts(settings_file: &std::path::Path) -> ShortcutMap {
     let path = settings_file
         .parent()
         .unwrap_or_else(|| std::path::Path::new(""))
-        .join("rapid-explorer-shortcuts.txt");
-    ShortcutMap::load(&path).unwrap_or_else(|_| ShortcutMap::builtin())
+        .join(SHORTCUTS_FILE);
+    match ShortcutMap::load(&path) {
+        Ok(map) => map,
+        Err(err) => {
+            eprintln!(
+                "list_shell ignored {} and kept the builtin shortcuts: {err}",
+                path.display()
+            );
+            ShortcutMap::builtin()
+        }
+    }
 }
 
 fn is_address(hwnd: HWND, candidate: HWND) -> bool {
@@ -1389,6 +1411,8 @@ fn update_nav_buttons(hwnd: HWND) {
 
 fn on_timer(hwnd: HWND) {
     try_pending(hwnd);
+    let kept_left = selection_to_keep(hwnd, PaneId::Left, false);
+    let kept_right = selection_to_keep(hwnd, PaneId::Right, false);
     let painted = {
         let Some(state) = state_mut(hwnd) else {
             return;
@@ -1497,6 +1521,14 @@ fn on_timer(hwnd: HWND) {
     paint(inactive_list, inactive_change, inactive_rows);
     if search_refreshed {
         set_count(active_list, shown);
+    }
+    for (id, kept, change) in [
+        (PaneId::Left, kept_left, left_change),
+        (PaneId::Right, kept_right, right_change),
+    ] {
+        if let Some(names) = kept.filter(|_| change != RowChange::Unchanged) {
+            restore_selection(hwnd, id, &names);
+        }
     }
     if left_thumbs {
         redraw_visible(left_list);
@@ -1623,37 +1655,67 @@ fn drain_pane(pane: &mut PaneView) -> RowChange {
     if timed_out {
         rows.note_timeout();
     }
-    if change != RowChange::Unchanged {
-        if let Some(sort) = pane.sort {
-            rows.sort_shown(sort);
-        }
-    }
     change
 }
 
+/// Give freshly opened rows this pane's sort, so navigating keeps the order.
 fn resort_pane(pane: &mut PaneView) {
     if let Some(sort) = pane.sort {
-        pane.rows.sort_shown(sort);
+        pane.rows.set_sort(sort);
+    }
+}
+
+/// Names selected in a pane whose rows may reorder, read before they do.
+///
+/// The list control keeps selection by row index. When sorted rows reorder
+/// (a new batch, a changed cache hit, or a header click), the same index
+/// names another file, and a following Delete or Rename would act on it.
+/// None when the pane shows search hits or its rows cannot reorder.
+fn selection_to_keep(hwnd: HWND, id: PaneId, reorder_pending: bool) -> Option<Vec<String>> {
+    let list = state_mut(hwnd).and_then(|state| {
+        let shows_hits = list_shows_search(state.query.is_active(), state.panes.active() == id);
+        let pane = pane_ref(state, id);
+        let can_reorder = reorder_pending || pane.rows.may_reorder();
+        (can_reorder && !shows_hits).then_some(pane.list)
+    })?;
+    let indexes = selected_indexes(list);
+    if indexes.is_empty() {
+        return None;
+    }
+    state_mut(hwnd).map(|state| pane_ref(state, id).rows.names_at(&indexes))
+}
+
+/// Select `names` again at their new rows. Called outside any state borrow,
+/// because `LVM_SETITEMSTATE` notifies this window.
+fn restore_selection(hwnd: HWND, id: PaneId, names: &[String]) {
+    let Some((list, indexes)) = state_mut(hwnd).map(|state| {
+        let pane = pane_ref(state, id);
+        (pane.list, pane.rows.indexes_of(names))
+    }) else {
+        return;
+    };
+    set_selected(list, usize::MAX, false);
+    for index in indexes {
+        set_selected(list, index, true);
     }
 }
 
 fn apply_notice(hwnd: HWND, id: PaneId, update: NoticeUpdate) {
-    let Some((label, next, changed)) = state_mut(hwnd).map(|state| {
+    let Some((label, next, changed, path)) = state_mut(hwnd).map(|state| {
         let pane = pane_mut(state, id);
-        let changed = match update {
-            NoticeUpdate::Set(notice) => pane.notice != Some(notice),
-            NoticeUpdate::Clear => pane.notice.is_some(),
-            NoticeUpdate::Keep => false,
-        };
-        match update {
-            NoticeUpdate::Set(notice) => pane.notice = Some(notice),
-            NoticeUpdate::Clear => pane.notice = None,
-            NoticeUpdate::Keep => {}
-        }
-        (pane.notice_label, pane.notice, changed)
+        let changed = update.apply(&mut pane.notice);
+        (
+            pane.notice_label,
+            pane.notice,
+            changed,
+            pane.current.clone(),
+        )
     }) else {
         return;
     };
+    if changed {
+        eprintln!("list_shell {id:?} pane notice is now {next:?} for {path}");
+    }
     match next {
         Some(notice) => {
             set_control_text(label, notice.label());
@@ -1665,6 +1727,30 @@ fn apply_notice(hwnd: HWND, id: PaneId, update: NoticeUpdate) {
     }
     if changed {
         fit_panes(hwnd);
+    }
+}
+
+/// One pane's column below the navigation bar: tab strip, then the notice
+/// band (zero high while clear), then the list in whatever height remains.
+#[derive(Clone, Copy)]
+struct PaneColumn {
+    x: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+}
+
+impl PaneColumn {
+    fn fit(self, tabs: HWND, notice: HWND, notice_height: i32, list: HWND) {
+        let tab_height = tab_strip::TAB_HEIGHT;
+        let notice_top = self.top + tab_height;
+        let list_top = notice_top + notice_height;
+        let list_height = (self.height - tab_height - notice_height).max(0);
+        unsafe {
+            MoveWindow(tabs, self.x, self.top, self.width, tab_height, 1);
+            MoveWindow(notice, self.x, notice_top, self.width, notice_height, 1);
+            MoveWindow(list, self.x, list_top, self.width, list_height, 1);
+        }
     }
 }
 
@@ -1716,27 +1802,59 @@ fn on_column_click(hwnd: HWND, lparam: LPARAM) {
     let Some(id) = state_mut(hwnd).and_then(|state| pane_id_from_list(state, list)) else {
         return;
     };
-    let showing_hits =
-        state_mut(hwnd).is_some_and(|state| state.query.is_active() && state.panes.active() == id);
+    let showing_hits = state_mut(hwnd).is_some_and(|state| {
+        list_shows_search(state.query.is_active(), state.panes.active() == id)
+    });
     if showing_hits {
         return;
     }
     let Some(column) = sort_column(header.iSubItem) else {
         return;
     };
-    let Some((list, count)) = state_mut(hwnd).map(|state| {
+    let kept = selection_to_keep(hwnd, id, true);
+    let Some((list, count, sort)) = state_mut(hwnd).map(|state| {
         let pane = pane_mut(state, id);
         let sort = RowSort::header_click(pane.sort, column);
         pane.sort = Some(sort);
-        pane.rows.sort_shown(sort);
-        (pane.list, pane.rows.shown().len())
+        pane.rows.set_sort(sort);
+        (pane.list, pane.rows.shown().len(), sort)
     }) else {
         return;
     };
+    if let Some(names) = kept {
+        restore_selection(hwnd, id, &names);
+    }
+    show_sort_arrow(list, sort);
     if count > 0 {
         unsafe {
             SendMessageW(list, LVM_REDRAWITEMS, 0, (count - 1) as LPARAM);
         }
+    }
+}
+
+/// Draw the theme's sort arrow on the sorted column and clear it on the
+/// others, so the order is visible and announced by accessibility tools.
+fn show_sort_arrow(list: HWND, sort: RowSort) {
+    let header = unsafe { SendMessageW(list, LVM_GETHEADER, 0, 0) } as HWND;
+    if header.is_null() {
+        return;
+    }
+    for subitem in 0..columns::COUNT {
+        let mut item: HDITEMW = unsafe { std::mem::zeroed() };
+        item.mask = HDI_FORMAT;
+        let item_ptr = &mut item as *mut HDITEMW as LPARAM;
+        let read = unsafe { SendMessageW(header, HDM_GETITEMW, subitem as WPARAM, item_ptr) };
+        if read == 0 {
+            continue;
+        }
+        item.fmt &= !(HDF_SORTUP | HDF_SORTDOWN);
+        if sort_column(subitem) == Some(sort.column) {
+            item.fmt |= match sort.dir {
+                SortDir::Asc => HDF_SORTUP,
+                SortDir::Desc => HDF_SORTDOWN,
+            };
+        }
+        unsafe { SendMessageW(header, HDM_SETITEMW, subitem as WPARAM, item_ptr) };
     }
 }
 
@@ -2700,49 +2818,19 @@ fn fit_panes(hwnd: HWND) {
         let lists = (width - tree_width - NAV_GAP).max(0);
         let left_width = lists / 2;
         let right_width = lists - left_width;
-        let tab_height = tab_strip::TAB_HEIGHT;
         MoveWindow(tree, 0, top, tree_width, body, 1);
-        MoveWindow(left_tabs, tree_width, top, left_width, tab_height, 1);
-        let left_notice_top = top + tab_height;
-        MoveWindow(
-            left_notice,
-            tree_width,
-            left_notice_top,
-            left_width,
-            left_notice_height,
-            1,
-        );
-        let left_list_top = left_notice_top + left_notice_height;
-        let left_list_body = (body - tab_height - left_notice_height).max(0);
-        MoveWindow(
-            left,
-            tree_width,
-            left_list_top,
-            left_width,
-            left_list_body,
-            1,
-        );
-        let right_x = tree_width + left_width + NAV_GAP;
-        MoveWindow(right_tabs, right_x, top, right_width, tab_height, 1);
-        let right_notice_top = top + tab_height;
-        MoveWindow(
-            right_notice,
-            right_x,
-            right_notice_top,
-            right_width,
-            right_notice_height,
-            1,
-        );
-        let right_list_top = right_notice_top + right_notice_height;
-        let right_list_body = (body - tab_height - right_notice_height).max(0);
-        MoveWindow(
-            right,
-            right_x,
-            right_list_top,
-            right_width,
-            right_list_body,
-            1,
-        );
+        let left_column = PaneColumn {
+            x: tree_width,
+            top,
+            width: left_width,
+            height: body,
+        };
+        left_column.fit(left_tabs, left_notice, left_notice_height, left);
+        let right_column = PaneColumn {
+            x: tree_width + left_width + NAV_GAP,
+            ..left_column
+        };
+        right_column.fit(right_tabs, right_notice, right_notice_height, right);
         size_columns(left, left_width);
         size_columns(right, right_width);
     }
@@ -3336,14 +3424,21 @@ fn focus_address(hwnd: HWND) {
     }
 }
 
+/// True when `vk` is held. `GetKeyState` reads modifier state, so Ctrl, Alt,
+/// and Shift are checked here instead of as the `WM_KEYDOWN` key.
 fn key_down(vk: u16) -> bool {
     unsafe { GetKeyState(i32::from(vk)) < 0 }
 }
 
+/// True when this `WM_KEYDOWN` is an auto-repeat. Bit 30 of `lParam` is the
+/// previous state of the key.
 fn key_repeat(lparam: LPARAM) -> bool {
     lparam & (1 << 30) != 0
 }
 
+/// Rewrite one pane's tab titles from its remembered paths and select the
+/// active tab. `TCM_SETCURSEL` can send `TCN_SELCHANGE`; [`on_tab_change`]
+/// ignores that notice when the index is already active.
 fn refill_tabs(hwnd: HWND, id: PaneId) {
     let Some((strip, titles, active)) = state_mut(hwnd).map(|state| {
         let pane = pane_ref(state, id);
@@ -3360,6 +3455,8 @@ fn refill_tabs(hwnd: HWND, id: PaneId) {
     tab_strip::refill(strip, &titles, active);
 }
 
+/// Ctrl+T on the active pane. The new tab copies that pane's active path.
+/// The list stays on the path it is already showing.
 fn new_active_tab(hwnd: HWND) {
     let Some(id) = state_mut(hwnd).map(|state| state.panes.active()) else {
         return;
@@ -3372,6 +3469,9 @@ fn new_active_tab(hwnd: HWND) {
     refill_tabs(hwnd, id);
 }
 
+/// Ctrl+W on the active pane. The only tab stays open. When the neighbor
+/// path differs from the path on screen, that path is listed through
+/// [`request_navigation`].
 fn close_active_tab(hwnd: HWND) {
     let Some(id) = state_mut(hwnd).map(|state| state.panes.active()) else {
         return;
@@ -3391,6 +3491,8 @@ fn close_active_tab(hwnd: HWND) {
     }
 }
 
+/// Ctrl+Tab on the active pane, or Ctrl+Shift+Tab when `backward` is set.
+/// The next index wraps around the strip.
 fn cycle_active_tab(hwnd: HWND, backward: bool) {
     let Some(id) = state_mut(hwnd).map(|state| state.panes.active()) else {
         return;
@@ -3417,6 +3519,8 @@ fn cycle_active_tab(hwnd: HWND, backward: bool) {
     choose_tab(hwnd, id, index);
 }
 
+/// Activate `index` on `id`, focus that pane, and list the tab's path.
+/// A missing index, or the index that is already active, leaves the pane as it is.
 fn choose_tab(hwnd: HWND, id: PaneId, index: usize) {
     let Some(path) = state_mut(hwnd).and_then(|state| {
         let pane = pane_mut(state, id);
@@ -3431,6 +3535,8 @@ fn choose_tab(hwnd: HWND, id: PaneId, index: usize) {
     request_navigation(hwnd, path, NavKind::Restore);
 }
 
+/// `TCN_SELCHANGE` from a tab strip. A selection that is already the active
+/// tab is ignored, so refilling the strip does not list the directory again.
 fn on_tab_change(hwnd: HWND, lparam: LPARAM) {
     let header = unsafe { &*(lparam as *const NMHDR) };
     let Some(id) = tab_strip::pane_for(header.idFrom as isize) else {
