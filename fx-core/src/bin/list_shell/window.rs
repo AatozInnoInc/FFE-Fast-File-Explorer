@@ -94,6 +94,7 @@ use crate::images;
 use crate::nav::{normalize_address, same_directory, tree_root, TreeRoot};
 use crate::pane_notice::{notice_on_listing, notice_on_open_error, NoticeUpdate, PaneNotice};
 use crate::panes::{PaneId, Panes};
+use crate::parent_path::parent_directory;
 use crate::places::{PlaceChange, PlaceList};
 use crate::query::Query;
 use crate::rows::{DirectoryRows, RowChange};
@@ -823,18 +824,34 @@ fn run_shortcut(hwnd: HWND, action: Action) {
         Action::NextTab => cycle_active_tab(hwnd, false),
         Action::PreviousTab => cycle_active_tab(hwnd, true),
         Action::Refresh => refresh_active(hwnd),
+        Action::Parent => go_parent(hwnd),
     }
+}
+
+/// [`Action::Parent`]: list the parent of the active pane's directory as a
+/// new history entry. A drive root or UNC share root has no parent.
+fn go_parent(hwnd: HWND) {
+    let Some(path) = active_pane_path(hwnd) else {
+        return;
+    };
+    let Some(parent) = parent_directory(&path) else {
+        return;
+    };
+    request_navigation(hwnd, parent, NavKind::Push);
 }
 
 /// [`Action::Refresh`]: list the active pane's directory again without
 /// pushing history.
 fn refresh_active(hwnd: HWND) {
-    let Some(path) =
-        state_mut(hwnd).map(|state| pane_ref(state, state.panes.active()).current.clone())
-    else {
+    let Some(path) = active_pane_path(hwnd) else {
         return;
     };
     request_navigation(hwnd, path, NavKind::Refresh);
+}
+
+/// Directory the active pane is showing.
+fn active_pane_path(hwnd: HWND) -> Option<String> {
+    state_mut(hwnd).map(|state| pane_ref(state, state.panes.active()).current.clone())
 }
 
 /// Overrides from `rapid-explorer-shortcuts.txt` beside the settings file.

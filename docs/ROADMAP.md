@@ -44,6 +44,7 @@ The next substantial capability step.
 - [x] Alt+D focuses the address bar and selects its text. Alt+Left and Alt+Right stay Back and Forward — `done`
 - [x] Customize every keyboard shortcut. Built-in chords stay until the user changes them. A missing `rapid-explorer-shortcuts.txt` stays missing. Storing the builtin map removes the file. A chord needs Ctrl or Alt unless its key is F1 to F24. An unreadable file is logged and the builtin chords are used. Enter in the address bar is not a customizable chord (`done`)
 - [x] A timed-out pane shows "Not responding" on its own label. A busy volume does not. A finished listing clears it. There is no auto-retry (`done`)
+- [x] Alt+Up opens the parent directory of the active pane. Plain Up stays list navigation. Drive roots and UNC share roots stay put. The parent comes from the path text (`done`)
 
 ## Future / parking lot
 

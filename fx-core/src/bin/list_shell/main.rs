@@ -16,6 +16,7 @@ mod images;
 mod nav;
 mod pane_notice;
 mod panes;
+mod parent_path;
 mod places;
 mod query;
 mod rows;
