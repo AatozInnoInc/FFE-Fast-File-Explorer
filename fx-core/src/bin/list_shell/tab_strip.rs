@@ -24,6 +24,7 @@ pub const TAB_CLASSES: u32 = 0x0008;
 /// Height of the tab strip. Not a performance budget.
 pub const TAB_HEIGHT: i32 = 22;
 
+/// Pane that owns this tab-strip control id.
 pub fn pane_for(control_id: isize) -> Option<PaneId> {
     match control_id {
         ID_TABS_LEFT => Some(PaneId::Left),
@@ -32,6 +33,7 @@ pub fn pane_for(control_id: isize) -> Option<PaneId> {
     }
 }
 
+/// An empty tab control. The caller fills it with [`refill`].
 pub fn create(parent: HWND, id: isize) -> Result<HWND, u8> {
     let hwnd = unsafe {
         CreateWindowExW(
@@ -56,6 +58,8 @@ pub fn create(parent: HWND, id: isize) -> Result<HWND, u8> {
     Ok(hwnd)
 }
 
+/// Clear the control, insert `titles` in order, and select `active`.
+/// `TCM_SETCURSEL` notifies the parent. An empty `titles` leaves the strip clear.
 pub fn refill(tab: HWND, titles: &[String], active: usize) {
     unsafe {
         SendMessageW(tab, TCM_DELETEALLITEMS, 0, 0);
@@ -87,10 +91,12 @@ pub fn refill(tab: HWND, titles: &[String], active: usize) {
     }
 }
 
+/// Child, visible, and clipped so the list below does not paint through the tabs.
 fn style() -> WINDOW_STYLE {
     WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS
 }
 
+/// UTF-16 with a trailing null for `TCITEMW::pszText`.
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
 }
