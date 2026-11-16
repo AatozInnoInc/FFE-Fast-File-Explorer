@@ -10,9 +10,13 @@
 /// A rectangle in device pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PxRect {
+    /// Left edge, inclusive.
     pub left: i32,
+    /// Top edge, inclusive.
     pub top: i32,
+    /// Right edge, exclusive, as in a Win32 `RECT`.
     pub right: i32,
+    /// Bottom edge, exclusive, as in a Win32 `RECT`.
     pub bottom: i32,
 }
 

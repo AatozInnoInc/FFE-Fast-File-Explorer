@@ -64,6 +64,8 @@ fn is_unc_share_root(path: &str) -> bool {
     body.split('\\').filter(|part| !part.is_empty()).count() < 3
 }
 
+/// The part after the UNC prefix (`\\?\UNC\` or `\\`), starting at the
+/// server name. None for a path that is not UNC, including `\\?\C:\...`.
 fn unc_body(path: &str) -> Option<&str> {
     if let Some(body) = path.strip_prefix(r"\\?\UNC\") {
         return Some(body);

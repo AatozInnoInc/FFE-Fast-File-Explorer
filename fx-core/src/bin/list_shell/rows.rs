@@ -96,6 +96,9 @@ impl DirectoryRows {
             .collect()
     }
 
+    /// Sort `entries` by `sort`, or leave them in arrival order when no sort
+    /// is set. An associated function so it can borrow one field while
+    /// another is borrowed mutably.
     fn sort_in_place(sort: Option<RowSort>, entries: &mut [FileEntry]) {
         if let Some(sort) = sort {
             sort_entries(entries, sort);

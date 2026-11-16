@@ -9,22 +9,29 @@ use fx_core::FileEntry;
 /// A list column the rows can be ordered by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortColumn {
+    /// File name, case-insensitive.
     Name,
+    /// Size in bytes. Directories use the size the listing reports.
     Size,
+    /// Last write time.
     Modified,
 }
 
 /// Ascending or descending.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortDir {
+    /// Smallest, earliest, or A first.
     Asc,
+    /// Largest, latest, or Z first.
     Desc,
 }
 
 /// One column and one direction. A pane has at most one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RowSort {
+    /// The column whose header was clicked last.
     pub column: SortColumn,
+    /// Direction on that column.
     pub dir: SortDir,
 }
 
