@@ -15,6 +15,7 @@ mod network;
 pub mod rank;
 pub mod settings;
 mod shell;
+pub mod shortcuts;
 mod source;
 pub mod thumbs;
 pub mod watchdog;

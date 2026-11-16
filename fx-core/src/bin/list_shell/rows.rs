@@ -24,6 +24,8 @@ pub struct DirectoryRows {
     incoming: Vec<FileEntry>,
     from_cache: bool,
     settled: bool,
+    /// Last `Finished` or `TimedOut` the pane notice has not read.
+    terminal: Option<ListingEvent>,
 }
 
 impl DirectoryRows {
@@ -35,12 +37,14 @@ impl DirectoryRows {
                 incoming: Vec::new(),
                 from_cache: true,
                 settled: false,
+                terminal: None,
             },
             None => Self {
                 shown: Vec::new(),
                 incoming: Vec::new(),
                 from_cache: false,
                 settled: false,
+                terminal: None,
             },
         }
     }
@@ -51,6 +55,16 @@ impl DirectoryRows {
 
     pub fn is_settled(&self) -> bool {
         self.settled
+    }
+
+    /// `Finished` or `TimedOut` since the last read. Other events are not stored.
+    pub fn take_terminal(&mut self) -> Option<ListingEvent> {
+        self.terminal.take()
+    }
+
+    /// `poll` returned [`fx_core::EnumError::TimedOut`] instead of a listing event.
+    pub fn note_timeout(&mut self) {
+        self.terminal = Some(ListingEvent::TimedOut);
     }
 
     /// Keep the rows already shown. Used when the live listing never starts.
@@ -102,6 +116,7 @@ impl DirectoryRows {
                 }
             }
             ListingEvent::Finished => {
+                self.terminal = Some(ListingEvent::Finished);
                 self.settled = true;
                 if !self.from_cache {
                     return RowChange::Unchanged;
@@ -120,7 +135,12 @@ impl DirectoryRows {
                 }
                 change
             }
-            ListingEvent::Cancelled | ListingEvent::TimedOut | ListingEvent::Failed(_) => {
+            ListingEvent::TimedOut => {
+                self.terminal = Some(ListingEvent::TimedOut);
+                self.stop();
+                RowChange::Unchanged
+            }
+            ListingEvent::Cancelled | ListingEvent::Failed(_) => {
                 self.stop();
                 RowChange::Unchanged
             }

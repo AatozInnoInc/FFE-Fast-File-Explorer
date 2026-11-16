@@ -54,11 +54,10 @@ use windows_sys::Win32::UI::Controls::{
     TVINSERTSTRUCTW_0, TVITEMW, TVI_LAST, TVI_ROOT, TVM_DELETEITEM, TVM_INSERTITEMW,
     TVM_SELECTITEM, TVM_SETITEMW, TVN_ITEMEXPANDINGW, TVN_SELCHANGEDW, TVS_DISABLEDRAGDROP,
     TVS_HASBUTTONS, TVS_HASLINES, TVS_LINESATROOT, TVS_SHOWSELALWAYS, WC_BUTTONW, WC_EDITW,
-    WC_LISTVIEWW, WC_TREEVIEWW,
+    WC_LISTVIEWW, WC_STATICW, WC_TREEVIEWW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    EnableWindow, GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_F6, VK_LEFT, VK_MENU, VK_RETURN,
-    VK_RIGHT, VK_SHIFT, VK_T, VK_TAB, VK_W,
+    EnableWindow, GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_MENU, VK_RETURN, VK_SHIFT,
 };
 use windows_sys::Win32::UI::Shell::{
     SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_SMALLICON, SHGFI_USEFILEATTRIBUTES,
@@ -71,7 +70,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SetWindowLongPtrW, SetWindowTextW, ShowWindow, TrackPopupMenu, TranslateMessage, BN_CLICKED,
     BS_PUSHBUTTON, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, EN_CHANGE, ES_AUTOHSCROLL, GA_ROOT,
     GWLP_USERDATA, GWL_STYLE, HMENU, IDC_ARROW, IDYES, MB_ICONWARNING, MB_YESNO, MF_SEPARATOR,
-    MF_STRING, MSG, SIZE_MINIMIZED, SM_CXSMICON, SM_CYSMICON, SW_SHOW, TPM_RETURNCMD,
+    MF_STRING, MSG, SIZE_MINIMIZED, SM_CXSMICON, SM_CYSMICON, SW_HIDE, SW_SHOW, TPM_RETURNCMD,
     TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY,
     WM_GETFONT, WM_KEYDOWN, WM_NOTIFY, WM_SIZE, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_BORDER,
     WS_CHILD, WS_CLIPCHILDREN, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
@@ -80,11 +79,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use fx_core::filename_index::{FilenameIndex, IndexRecord};
 use fx_core::helper::HelperSession;
 use fx_core::settings::TimeoutSetting;
+use fx_core::shortcuts::{Action, Chord, ShortcutMap};
 use fx_core::thumbs::{ThumbCache, ThumbTicket, TryThumb};
 use fx_core::VolumeKind;
 use fx_core::{EnumError, NetworkBrowse, NetworkPlace, OpenedDirectory, Path, Shell, VolumeId};
 
-use crate::address_focus::{focuses_address, Mods, VK_D};
 use crate::cell;
 use crate::columns;
 use crate::commands::{self, Command};
@@ -93,6 +92,7 @@ use crate::file_ops::{self, FileOp, Op};
 use crate::icons::{icon_key, IconCache, IconKey};
 use crate::images;
 use crate::nav::{normalize_address, same_directory, tree_root, TreeRoot};
+use crate::pane_notice::{notice_on_listing, notice_on_open_error, NoticeUpdate, PaneNotice};
 use crate::panes::{PaneId, Panes};
 use crate::places::{PlaceChange, PlaceList};
 use crate::query::Query;
@@ -122,6 +122,20 @@ const ID_ADDRESS: isize = 5;
 const ID_TIMEOUT: isize = 6;
 const ID_SEARCH: isize = 7;
 const ID_OTHER: isize = 9;
+/// Control id of the left pane's notice label.
+const ID_NOTICE_LEFT: isize = 12;
+/// Control id of the right pane's notice label.
+const ID_NOTICE_RIGHT: isize = 13;
+/// Height of a pane's notice band while it shows a notice. Not a performance budget.
+const NOTICE_HEIGHT: i32 = 18;
+/// `SS_LEFT`. Text starts at the left of the static control.
+const SS_LEFT: WINDOW_STYLE = 0x0000;
+/// `SS_CENTERIMAGE`. The single line sits in the vertical middle.
+const SS_CENTERIMAGE: WINDOW_STYLE = 0x0200;
+/// `SS_ENDELLIPSIS`. Text wider than a narrow pane ends with "...".
+const SS_ENDELLIPSIS: WINDOW_STYLE = 0x4000;
+/// `SS_NOPREFIX`. An `&` in a path is not an accelerator.
+const SS_NOPREFIX: WINDOW_STYLE = 0x0080;
 /// `TCN_SELCHANGE`. The tab strip sends this after the selection moves.
 const TCN_SELCHANGE: u32 = 0xFFFF_FDD9;
 /// Width of the search box. Not a performance budget.
@@ -137,6 +151,8 @@ const EM_SETSEL: u32 = 0x00B1;
 /// Width of the Timeout button. Not a performance budget.
 const TIMEOUT_WIDTH: i32 = 84;
 const NETWORK_LABEL: &str = "Network";
+/// Shortcut overrides, beside the settings file.
+const SHORTCUTS_FILE: &str = "rapid-explorer-shortcuts.txt";
 const CLASS_NAME: windows_sys::core::PCWSTR = w!("RapidExplorerList");
 
 struct ListWindow {
@@ -172,6 +188,8 @@ struct ListWindow {
     other: HWND,
     /// `rapid-explorer-settings.txt` beside this executable.
     settings_file: std::path::PathBuf,
+    /// Built-in chords, plus overrides from `rapid-explorer-shortcuts.txt` when that file exists.
+    shortcuts: ShortcutMap,
     /// Search box. Typing does not rank; the timer does.
     search: HWND,
     query: Query,
@@ -201,6 +219,10 @@ struct PaneView {
     tabs: PaneTabs,
     /// Tab strip above this pane's list.
     tab_strip: HWND,
+    /// Shown only after this pane's listing times out.
+    notice: Option<PaneNotice>,
+    /// Static text under the tab strip. Hidden while [`Self::notice`] is clear.
+    notice_label: HWND,
 }
 
 struct ThumbJob {
@@ -471,6 +493,28 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
     )?;
     let left_tabs = tab_strip::create(hwnd, tab_strip::ID_TABS_LEFT)?;
     let right_tabs = tab_strip::create(hwnd, tab_strip::ID_TABS_RIGHT)?;
+    let left_notice = create_control(
+        hwnd,
+        WC_STATICW,
+        "",
+        notice_style(),
+        0,
+        ID_NOTICE_LEFT,
+        "left notice",
+    )?;
+    let right_notice = create_control(
+        hwnd,
+        WC_STATICW,
+        "",
+        notice_style(),
+        0,
+        ID_NOTICE_RIGHT,
+        "right notice",
+    )?;
+    unsafe {
+        ShowWindow(left_notice, SW_HIDE);
+        ShowWindow(right_notice, SW_HIDE);
+    }
     let cue = wide("Search");
     unsafe {
         SendMessageW(search, EM_SETCUEBANNER, 1, cue.as_ptr() as LPARAM);
@@ -494,6 +538,8 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
             indexed_path: String::new(),
             tabs: PaneTabs::start(root.clone()),
             tab_strip: left_tabs,
+            notice: None,
+            notice_label: left_notice,
         },
         right: PaneView {
             list: right_list,
@@ -509,6 +555,8 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
             indexed_path: String::new(),
             tabs: PaneTabs::start(root.clone()),
             tab_strip: right_tabs,
+            notice: None,
+            notice_label: right_notice,
         },
         tree,
         back,
@@ -525,6 +573,7 @@ fn attach(hwnd: HWND, start: WindowStart) -> Result<(), u8> {
         menu_host: None,
         timeout,
         other,
+        shortcuts: load_shortcuts(&start.settings_file),
         settings_file: start.settings_file,
         search,
         query: Query::new(),
@@ -713,8 +762,9 @@ fn message_loop() -> ExitCode {
     }
 }
 
-/// Alt+Left, Alt+Right, and Enter in the address bar. The focused child would
-/// otherwise eat those keys. Enter is not dispatched, so the edit does not beep.
+/// Shortcuts from [`ShortcutMap`], plus Enter in the address bar. The focused
+/// child would otherwise eat those keys. Enter is not dispatched, so the edit
+/// does not beep. Enter is not a customizable chord.
 fn intercept(message: &MSG) -> bool {
     if message.hwnd.is_null() {
         return false;
@@ -723,54 +773,87 @@ fn intercept(message: &MSG) -> bool {
     if root.is_null() || state_mut(root).is_none() {
         return false;
     }
-    match message.message {
-        WM_SYSKEYDOWN => match message.wParam as u16 {
-            VK_LEFT => {
-                go_back(root);
-                true
-            }
-            VK_RIGHT => {
-                go_forward(root);
-                true
-            }
-            VK_D if focuses_address(
-                Mods {
-                    alt: key_down(VK_MENU),
-                    ctrl: key_down(VK_CONTROL),
-                    shift: key_down(VK_SHIFT),
-                },
-                VK_D,
-            ) =>
-            {
-                focus_address(root);
-                true
-            }
-            _ => false,
-        },
-        WM_KEYDOWN if message.wParam == VK_F6 as WPARAM => {
-            toggle_pane(root);
-            true
+    if message.message == WM_KEYDOWN
+        && message.wParam == VK_RETURN as WPARAM
+        && is_address(root, message.hwnd)
+    {
+        submit_address(root);
+        return true;
+    }
+    let Some(chord) = message_chord(message) else {
+        return false;
+    };
+    let Some(action) = state_mut(root).and_then(|state| state.shortcuts.lookup(chord)) else {
+        return false;
+    };
+    if key_repeat(message.lParam) && matches!(action, Action::NewTab | Action::CloseTab) {
+        return true;
+    }
+    run_shortcut(root, action);
+    true
+}
+
+/// The chord for a key-down message, read with the live modifier state.
+/// A bare modifier key is not a chord.
+fn message_chord(message: &MSG) -> Option<Chord> {
+    if message.message != WM_KEYDOWN && message.message != WM_SYSKEYDOWN {
+        return None;
+    }
+    let virtual_key = message.wParam as u16;
+    if matches!(virtual_key, VK_SHIFT | VK_CONTROL | VK_MENU) {
+        return None;
+    }
+    Some(Chord {
+        ctrl: key_down(VK_CONTROL),
+        alt: key_down(VK_MENU),
+        shift: key_down(VK_SHIFT),
+        virtual_key,
+    })
+}
+
+/// Dispatch one [`Action`] from the [`ShortcutMap`]. Every action has a handler.
+fn run_shortcut(hwnd: HWND, action: Action) {
+    match action {
+        Action::Back => go_back(hwnd),
+        Action::Forward => go_forward(hwnd),
+        Action::FocusAddress => focus_address(hwnd),
+        Action::TogglePane => toggle_pane(hwnd),
+        Action::NewTab => new_active_tab(hwnd),
+        Action::CloseTab => close_active_tab(hwnd),
+        Action::NextTab => cycle_active_tab(hwnd, false),
+        Action::PreviousTab => cycle_active_tab(hwnd, true),
+        Action::Refresh => refresh_active(hwnd),
+    }
+}
+
+/// [`Action::Refresh`]: list the active pane's directory again without
+/// pushing history.
+fn refresh_active(hwnd: HWND) {
+    let Some(path) =
+        state_mut(hwnd).map(|state| pane_ref(state, state.panes.active()).current.clone())
+    else {
+        return;
+    };
+    request_navigation(hwnd, path, NavKind::Refresh);
+}
+
+/// Overrides from `rapid-explorer-shortcuts.txt` beside the settings file.
+/// A file that cannot be read or parsed is reported and the builtin chords
+/// are used, so a typo never leaves the window without shortcuts.
+fn load_shortcuts(settings_file: &std::path::Path) -> ShortcutMap {
+    let path = settings_file
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new(""))
+        .join(SHORTCUTS_FILE);
+    match ShortcutMap::load(&path) {
+        Ok(map) => map,
+        Err(err) => {
+            eprintln!(
+                "list_shell ignored {} and kept the builtin shortcuts: {err}",
+                path.display()
+            );
+            ShortcutMap::builtin()
         }
-        WM_KEYDOWN if key_down(VK_CONTROL) && !key_down(VK_MENU) => match message.wParam as u16 {
-            VK_T if !key_repeat(message.lParam) => {
-                new_active_tab(root);
-                true
-            }
-            VK_W if !key_repeat(message.lParam) => {
-                close_active_tab(root);
-                true
-            }
-            VK_TAB => {
-                cycle_active_tab(root, key_down(VK_SHIFT));
-                true
-            }
-            _ => false,
-        },
-        WM_KEYDOWN if message.wParam == VK_RETURN as WPARAM && is_address(root, message.hwnd) => {
-            submit_address(root);
-            true
-        }
-        _ => false,
     }
 }
 
@@ -1047,11 +1130,14 @@ fn try_pane_pending(hwnd: HWND, id: PaneId) {
                 update_nav_buttons(hwnd);
             }
         }
-        Err(EnumError::VolumeBusy) => ensure_timer(hwnd),
-        Err(_) => {
-            if let Some(state) = state_mut(hwnd) {
+        Err(err) => {
+            let update = notice_on_open_error(&err);
+            if matches!(err, EnumError::VolumeBusy) {
+                ensure_timer(hwnd);
+            } else if let Some(state) = state_mut(hwnd) {
                 pane_mut(state, id).pending = None;
             }
+            apply_notice(hwnd, id, update);
         }
     }
 }
@@ -1327,6 +1413,8 @@ fn on_timer(hwnd: HWND) {
         let (tree_changes, settled_nodes) = drain_tree(state);
         let left_thumbs = poll_pane_thumbs(&mut state.left);
         let right_thumbs = poll_pane_thumbs(&mut state.right);
+        let left_terminal = state.left.rows.take_terminal();
+        let right_terminal = state.right.rows.take_terminal();
         let idle = state.left.pending.is_none()
             && state.right.pending.is_none()
             && state.left.rows.is_settled()
@@ -1355,6 +1443,8 @@ fn on_timer(hwnd: HWND) {
             left_thumbs,
             right_thumbs,
             search_refreshed,
+            left_terminal,
+            right_terminal,
         )
     };
     let (
@@ -1372,7 +1462,15 @@ fn on_timer(hwnd: HWND) {
         left_thumbs,
         right_thumbs,
         search_refreshed,
+        left_terminal,
+        right_terminal,
     ) = painted;
+    if let Some(event) = left_terminal {
+        apply_notice(hwnd, PaneId::Left, notice_on_listing(&event));
+    }
+    if let Some(event) = right_terminal {
+        apply_notice(hwnd, PaneId::Right, notice_on_listing(&event));
+    }
     let (active_list, active_rows, inactive_list, inactive_rows, active_change, inactive_change) =
         match active {
             PaneId::Left => (
@@ -1499,6 +1597,12 @@ fn drain_node(node: &mut FolderNode) -> ChildChange {
     expansion.apply_available(|| opened.poll())
 }
 
+/// Apply every listing event that is ready for one pane, without waiting.
+///
+/// A poll that fails with [`EnumError::TimedOut`] stops the rows like any
+/// other poll error, and is also recorded with
+/// [`DirectoryRows::note_timeout`] so the pane notice can show
+/// "Not responding" on the next timer tick.
 fn drain_pane(pane: &mut PaneView) -> RowChange {
     let PaneView {
         opened,
@@ -1515,7 +1619,107 @@ fn drain_pane(pane: &mut PaneView) -> RowChange {
         rows.stop();
         return RowChange::Unchanged;
     };
-    rows.apply_available(|| opened.poll())
+    // `apply_available` only sees a unit error, so the timeout is noted here.
+    let mut timed_out = false;
+    let change = rows.apply_available(|| match opened.poll() {
+        Err(EnumError::TimedOut) => {
+            timed_out = true;
+            Err(())
+        }
+        other => other.map_err(|_| ()),
+    });
+    if timed_out {
+        rows.note_timeout();
+    }
+    change
+}
+
+/// Apply `update` to pane `id`'s notice, then show or hide its label.
+///
+/// The Set/Clear/Keep decision lives in [`NoticeUpdate::apply`]; this only
+/// performs the Win32 side. The pane is re-laid out only when the notice
+/// changed, because the band above the list appears or disappears with it.
+/// Each change is logged with the pane and the directory it applies to.
+fn apply_notice(hwnd: HWND, id: PaneId, update: NoticeUpdate) {
+    let Some((label, next, changed, path)) = state_mut(hwnd).map(|state| {
+        let pane = pane_mut(state, id);
+        let changed = update.apply(&mut pane.notice);
+        (
+            pane.notice_label,
+            pane.notice,
+            changed,
+            pane.current.clone(),
+        )
+    }) else {
+        return;
+    };
+    if changed {
+        eprintln!("list_shell {id:?} pane notice is now {next:?} for {path}");
+    }
+    match next {
+        Some(notice) => {
+            set_control_text(label, notice.label());
+            unsafe { ShowWindow(label, SW_SHOW) };
+        }
+        None => unsafe {
+            ShowWindow(label, SW_HIDE);
+        },
+    }
+    if changed {
+        fit_panes(hwnd);
+    }
+}
+
+/// One pane's column below the navigation bar: tab strip, then the notice
+/// band (zero high while clear), then the list in whatever height remains.
+///
+/// Both panes share this layout, so [`fit_panes`] describes each column once
+/// instead of repeating the `MoveWindow` arithmetic per pane.
+#[derive(Clone, Copy)]
+struct PaneColumn {
+    /// Left edge in client pixels.
+    x: i32,
+    /// Top of the tab strip, just below the navigation bar.
+    top: i32,
+    /// Column width. The two panes can differ by one pixel when the space
+    /// for the lists is odd.
+    width: i32,
+    /// Height from `top` to the bottom of the client area.
+    height: i32,
+}
+
+impl PaneColumn {
+    /// Move the tab strip, notice label, and list into this column with
+    /// `MoveWindow`, stacked top to bottom. `notice_height` is zero while the
+    /// pane has no notice, so the list then starts right under the tabs. The
+    /// list height never goes below zero when the window is very short.
+    fn fit(self, tabs: HWND, notice: HWND, notice_height: i32, list: HWND) {
+        let tab_height = tab_strip::TAB_HEIGHT;
+        let notice_top = self.top + tab_height;
+        let list_top = notice_top + notice_height;
+        let list_height = (self.height - tab_height - notice_height).max(0);
+        unsafe {
+            MoveWindow(tabs, self.x, self.top, self.width, tab_height, 1);
+            MoveWindow(notice, self.x, notice_top, self.width, notice_height, 1);
+            MoveWindow(list, self.x, list_top, self.width, list_height, 1);
+        }
+    }
+}
+
+/// Height of the notice band: [`NOTICE_HEIGHT`] while a notice is shown,
+/// zero otherwise.
+fn notice_band(notice: Option<PaneNotice>) -> i32 {
+    if notice.is_some() {
+        NOTICE_HEIGHT
+    } else {
+        0
+    }
+}
+
+/// Hidden child static: one line, left aligned, vertically centered, cut with
+/// an ellipsis in a narrow pane, and `&` shown as text.
+fn notice_style() -> WINDOW_STYLE {
+    WS_CHILD | SS_LEFT | SS_CENTERIMAGE | SS_ENDELLIPSIS | SS_NOPREFIX
 }
 
 fn paint(list: HWND, change: RowChange, shown: usize) {
@@ -2406,6 +2610,10 @@ fn fit_panes(hwnd: HWND) {
         right,
         left_tabs,
         right_tabs,
+        left_notice,
+        right_notice,
+        left_notice_height,
+        right_notice_height,
     )) = state_mut(hwnd).map(|state| {
         (
             state.tree,
@@ -2419,6 +2627,10 @@ fn fit_panes(hwnd: HWND) {
             state.right.list,
             state.left.tab_strip,
             state.right.tab_strip,
+            state.left.notice_label,
+            state.right.notice_label,
+            notice_band(state.left.notice),
+            notice_band(state.right.notice),
         )
     })
     else {
@@ -2452,15 +2664,23 @@ fn fit_panes(hwnd: HWND) {
         let lists = (width - tree_width - NAV_GAP).max(0);
         let left_width = lists / 2;
         let right_width = lists - left_width;
-        let tab_height = tab_strip::TAB_HEIGHT;
-        let list_top = top + tab_height;
-        let list_body = (body - tab_height).max(0);
         MoveWindow(tree, 0, top, tree_width, body, 1);
-        MoveWindow(left_tabs, tree_width, top, left_width, tab_height, 1);
-        MoveWindow(left, tree_width, list_top, left_width, list_body, 1);
-        let right_x = tree_width + left_width + NAV_GAP;
-        MoveWindow(right_tabs, right_x, top, right_width, tab_height, 1);
-        MoveWindow(right, right_x, list_top, right_width, list_body, 1);
+        // Each pane column is tab strip, notice band, then list. The right
+        // pane takes the odd pixel when the space for the lists is odd.
+        let left_column = PaneColumn {
+            x: tree_width,
+            top,
+            width: left_width,
+            height: body,
+        };
+        left_column.fit(left_tabs, left_notice, left_notice_height, left);
+        let right_column = PaneColumn {
+            x: tree_width + left_width + NAV_GAP,
+            top,
+            width: right_width,
+            height: body,
+        };
+        right_column.fit(right_tabs, right_notice, right_notice_height, right);
         size_columns(left, left_width);
         size_columns(right, right_width);
     }
