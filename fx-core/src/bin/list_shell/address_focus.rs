@@ -1,5 +1,4 @@
 #![cfg_attr(not(windows), allow(dead_code))]
-#![cfg_attr(not(test), allow(dead_code))]
 //! Alt+D focuses the address bar.
 //!
 //! Nothing here calls Win32. [`focuses_address`] reads modifier state and a
@@ -14,7 +13,7 @@ pub struct Mods {
 }
 
 /// Virtual-key code for D. Alt+Left and Alt+Right are `0x25` and `0x27`.
-const VK_D: u16 = 0x44;
+pub const VK_D: u16 = 0x44;
 
 /// Alt+D with Ctrl up and Shift up. `virtual_key` is a Win32 VK code.
 pub fn focuses_address(mods: Mods, virtual_key: u16) -> bool {

@@ -84,7 +84,7 @@ use fx_core::thumbs::{ThumbCache, ThumbTicket, TryThumb};
 use fx_core::VolumeKind;
 use fx_core::{EnumError, NetworkBrowse, NetworkPlace, OpenedDirectory, Path, Shell, VolumeId};
 
-use crate::address_focus::{focuses_address, Mods};
+use crate::address_focus::{focuses_address, Mods, VK_D};
 use crate::cell;
 use crate::columns;
 use crate::commands::{self, Command};
@@ -134,8 +134,6 @@ const NM_SETFOCUS: u32 = 4294967289;
 const EM_SETCUEBANNER: u32 = 0x1501;
 /// `EM_SETSEL`. Select the whole address when Alt+D focuses it.
 const EM_SETSEL: u32 = 0x00B1;
-/// Virtual-key code for D.
-const VK_D: u16 = 0x44;
 /// Width of the Timeout button. Not a performance budget.
 const TIMEOUT_WIDTH: i32 = 84;
 const NETWORK_LABEL: &str = "Network";
@@ -737,7 +735,7 @@ fn intercept(message: &MSG) -> bool {
             }
             VK_D if focuses_address(
                 Mods {
-                    alt: true,
+                    alt: key_down(VK_MENU),
                     ctrl: key_down(VK_CONTROL),
                     shift: key_down(VK_SHIFT),
                 },
