@@ -1,3 +1,4 @@
+#![cfg_attr(not(windows), allow(dead_code))]
 //! Sort order for rows the caller already has.
 //!
 //! Directories and files are one sequence. Equal keys keep their existing
@@ -5,6 +6,7 @@
 
 use fx_core::FileEntry;
 
+/// A list column the rows can be ordered by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortColumn {
     Name,
@@ -12,12 +14,14 @@ pub enum SortColumn {
     Modified,
 }
 
+/// Ascending or descending.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortDir {
     Asc,
     Desc,
 }
 
+/// One column and one direction. A pane has at most one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RowSort {
     pub column: SortColumn,
@@ -25,7 +29,8 @@ pub struct RowSort {
 }
 
 impl RowSort {
-    /// First click: Name ascending. Same column toggles direction. A different column starts ascending.
+    /// Clicking the column already sorted toggles its direction. Any other
+    /// column, or the first click on a pane, starts ascending on that column.
     pub fn header_click(current: Option<RowSort>, column: SortColumn) -> RowSort {
         match current {
             Some(current) if current.column == column => RowSort {
@@ -43,11 +48,16 @@ impl RowSort {
     }
 }
 
-/// Case-insensitive name: compare `name.to_lowercase()`. Size compares `size` as u64. Modified compares `last_write`.
+/// Name compares lowercase characters without allocating. Size compares
+/// `size` as u64. Modified compares `last_write`.
+///
+/// The sort is stable, and Rust's stable sort finds runs that are already
+/// ordered, so sorting rows that were sorted before a batch was appended
+/// costs close to one pass over them.
 pub fn sort_entries(entries: &mut [FileEntry], sort: RowSort) {
     entries.sort_by(|left, right| {
         let ordering = match sort.column {
-            SortColumn::Name => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
+            SortColumn::Name => folded(&left.name).cmp(folded(&right.name)),
             SortColumn::Size => left.size.cmp(&right.size),
             SortColumn::Modified => left.last_write.cmp(&right.last_write),
         };
@@ -56,6 +66,11 @@ pub fn sort_entries(entries: &mut [FileEntry], sort: RowSort) {
             SortDir::Desc => ordering.reverse(),
         }
     });
+}
+
+/// Lowercase characters of `name`, lazily, for a case-insensitive compare.
+fn folded(name: &str) -> impl Iterator<Item = char> + '_ {
+    name.chars().flat_map(char::to_lowercase)
 }
 
 #[cfg(test)]
@@ -172,11 +187,22 @@ mod tests {
     }
 
     #[test]
-    fn sort_does_not_read_the_filesystem() {
+    fn directories_and_files_sort_as_one_sequence() {
         let epoch = SystemTime::UNIX_EPOCH;
         let mut entries = vec![entry("b", 2, true, epoch), entry("A", 1, false, epoch)];
         sort_entries(&mut entries, by(SortColumn::Name, SortDir::Asc));
         assert_eq!(names(&entries), ["A", "b"]);
         assert!(entries[1].is_directory);
+    }
+
+    #[test]
+    fn name_sort_folds_non_ascii_case() {
+        let epoch = SystemTime::UNIX_EPOCH;
+        let mut entries = vec![
+            entry("Ölbild", 1, false, epoch),
+            entry("öffnen", 1, false, epoch),
+        ];
+        sort_entries(&mut entries, by(SortColumn::Name, SortDir::Asc));
+        assert_eq!(names(&entries), ["öffnen", "Ölbild"]);
     }
 }
