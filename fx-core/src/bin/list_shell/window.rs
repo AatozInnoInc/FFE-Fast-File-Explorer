@@ -823,6 +823,8 @@ fn run_shortcut(hwnd: HWND, action: Action) {
     }
 }
 
+/// [`Action::Refresh`]: list the active pane's directory again without
+/// pushing history.
 fn refresh_active(hwnd: HWND) {
     let Some(path) =
         state_mut(hwnd).map(|state| pane_ref(state, state.panes.active()).current.clone())
