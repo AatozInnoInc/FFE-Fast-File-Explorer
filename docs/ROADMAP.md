@@ -45,6 +45,7 @@ The next substantial capability step.
 - [x] Customize every keyboard shortcut. Built-in chords stay until the user changes them. A missing `rapid-explorer-shortcuts.txt` stays missing. Storing the builtin map removes the file. A chord needs Ctrl or Alt unless its key is F1 to F24. An unreadable file is logged and the builtin chords are used. Enter in the address bar is not a customizable chord (`done`)
 - [x] A timed-out pane shows "Not responding" on its own label. A busy volume does not. A finished listing clears it. There is no auto-retry (`done`)
 - [x] Alt+Up opens the parent directory of the active pane. Plain Up stays list navigation. Drive roots and UNC share roots stay put. The parent comes from the path text (`done`)
+- [x] Column headers sort the rows already listed by name, size, or date modified. Equal keys keep their order. The header shows the sort arrow. Selected files stay selected when rows reorder. An unchanged cache hit does not repaint. Search hits are not sorted (`done`)
 
 ## Future / parking lot
 
