@@ -129,8 +129,11 @@ const ID_ADDRESS: isize = 5;
 const ID_TIMEOUT: isize = 6;
 const ID_SEARCH: isize = 7;
 const ID_OTHER: isize = 9;
+/// Control id of the left pane's notice label.
 const ID_NOTICE_LEFT: isize = 12;
+/// Control id of the right pane's notice label.
 const ID_NOTICE_RIGHT: isize = 13;
+/// Height of a pane's notice band while it shows a notice. Not a performance budget.
 const NOTICE_HEIGHT: i32 = 18;
 /// `SS_LEFT`. Text starts at the left of the static control.
 const SS_LEFT: WINDOW_STYLE = 0x0000;
@@ -1820,6 +1823,8 @@ fn set_count(list: HWND, count: usize) {
     }
 }
 
+/// The sort column for a list subitem index. None for a column that does not
+/// sort.
 fn sort_column(subitem: i32) -> Option<SortColumn> {
     match subitem {
         columns::NAME => Some(SortColumn::Name),
@@ -1829,6 +1834,12 @@ fn sort_column(subitem: i32) -> Option<SortColumn> {
     }
 }
 
+/// `LVN_COLUMNCLICK`: sort the clicked pane's rows by that column, toggling
+/// the direction on a repeat click.
+///
+/// Ignored while the pane shows search hits. The selected files stay selected
+/// across the reorder, the header shows the sort arrow, and the visible rows
+/// are redrawn. The order is kept for this pane when it navigates.
 fn on_column_click(hwnd: HWND, lparam: LPARAM) {
     let header = unsafe { &*(lparam as *const NMLISTVIEW) };
     let list = header.hdr.hwndFrom;
