@@ -47,6 +47,7 @@ The next substantial capability step.
 - [x] Alt+Up opens the parent directory of the active pane. Plain Up stays list navigation. Drive roots and UNC share roots stay put. The parent comes from the path text (`done`)
 - [x] Column headers sort the rows already listed by name, size, or date modified. Equal keys keep their order. The header shows the sort arrow. Selected files stay selected when rows reorder. An unchanged cache hit does not repaint. Search hits are not sorted (`done`)
 - [x] A tree child whose path text repeats the node or an ancestor is not inserted. Reparse targets are not followed, so a junction back to an ancestor under another name is not caught yet (`done`)
+- [x] A reparse point draws a small square on its name icon in the system highlight color. Search hits do not. There is no shell overlay (`done`)
 
 ## Future / parking lot
 
