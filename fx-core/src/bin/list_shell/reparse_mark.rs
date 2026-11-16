@@ -16,11 +16,6 @@ pub struct PxRect {
     pub bottom: i32,
 }
 
-/// Whether the name icon should show the reparse badge. No other overlay kinds.
-pub fn shows_reparse_badge(is_reparse_point: bool) -> bool {
-    is_reparse_point
-}
-
 /// Square badge in the bottom-right of the icon.
 ///
 /// The side is `max(4, min(width, height) / 3)`, with integer division. The
@@ -54,12 +49,6 @@ pub fn reparse_badge(left: i32, top: i32, right: i32, bottom: i32) -> Option<PxR
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn shows_reparse_badge_only_when_the_flag_is_set() {
-        assert!(shows_reparse_badge(true));
-        assert!(!shows_reparse_badge(false));
-    }
 
     #[test]
     fn a_16_icon_gets_a_side_of_5_flush_to_the_corner() {

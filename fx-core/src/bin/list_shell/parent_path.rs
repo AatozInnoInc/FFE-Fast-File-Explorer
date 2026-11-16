@@ -1,9 +1,12 @@
+#![cfg_attr(not(windows), allow(dead_code))]
 //! Parent of a directory path.
 //!
 //! Nothing here reads the disk. `/` becomes `\`, and a trailing separator is
 //! not another component. Drive roots and UNC share roots have no parent.
 //! A `\\?\` or `\\?\UNC\` prefix stays on the parent. `..` is not invented
 //! and reparse points are not followed.
+
+use crate::nav::comparable_path;
 
 /// Parent directory of `path`. None for empty, a drive root, or a UNC share root.
 /// Does not touch the disk. `/` is treated as `\`.
@@ -12,10 +15,10 @@ pub fn parent_directory(path: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    // Same separator rules as `nav::comparable_path`: `/` becomes `\`, then
-    // trailing `\` are removed so `C:\` is the drive root `C:`.
-    let normalized = normalize_separators(trimmed);
-    if normalized.is_empty() || !has_parent(&normalized) {
+    // `/` becomes `\` and trailing `\` are removed, so `C:\` is the drive root `C:`.
+    let normalized = comparable_path(trimmed);
+    let parentable = has_parent(&normalized);
+    if !parentable {
         return None;
     }
     let parent = normalized.rsplit_once('\\')?.0.trim_end_matches('\\');
@@ -30,16 +33,9 @@ pub fn parent_directory(path: &str) -> Option<String> {
     }
 }
 
-/// `/` becomes `\`, then trailing `\` are removed.
-fn normalize_separators(path: &str) -> String {
-    let mut normalized = path.replace('/', "\\");
-    let end = normalized.trim_end_matches('\\').len();
-    normalized.truncate(end);
-    normalized
-}
-
+/// False for empty, a drive root, a UNC share root, or a single component.
 fn has_parent(path: &str) -> bool {
-    if is_drive_root(path) || is_unc_share_root(path) {
+    if path.is_empty() || is_drive_root(path) || is_unc_share_root(path) {
         return false;
     }
     // `\\?\foo` is one component inside the prefix, so it has no parent.
